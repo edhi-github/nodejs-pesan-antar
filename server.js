@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
+const PORT = 3000;
 
 // Middleware
 app.use(cors());
@@ -74,6 +75,7 @@ async function getShopIdBySlug(connectionOrPool, slug) {
     return rows.length > 0 ? rows[0].id : null;
 }
 
+
 // ==========================================
 // ENDPOINT BARU: AUTENTIKASI LOGIN (POST)
 // ==========================================
@@ -116,35 +118,42 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+
 // ==========================================
-// ENDPOINT BARU: PENDAFTARAN WARUNG (POST)
+// ENDPOINT: PENDAFTARAN WARUNG DENGAN AUTH (POST)
 // ==========================================
 app.post('/api/shops/register', async (req, res) => {
     try {
-        const { shop_name, owner_name } = req.body;
+        const { shop_name, owner_name, username, password } = req.body;
         
-        if (!shop_name || !owner_name) {
-            return res.status(400).json({ success: false, message: 'Nama warung dan pemilik wajib diisi.' });
+        if (!shop_name || !owner_name || !username || !password) {
+            return res.status(400).json({ success: false, message: 'Semua field (Nama warung, pemilik, username, password) wajib diisi.' });
         }
 
         let slug = generateSlug(shop_name);
 
         // Cek apakah slug sudah dipakai warung lain, jika ya tambahkan angka acak di belakangnya
-        const [rows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [slug]);
-        if (rows.length > 0) {
+        const [slugRows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [slug]);
+        if (slugRows.length > 0) {
             slug = `${slug}-${Math.floor(1000 + Math.random() * 9000)}`;
         }
 
-        // Simpan warung baru ke database
+        // Cek apakah username sudah dipakai oleh warung lain
+        const [userRows] = await pool.query('SELECT id FROM shops WHERE username = ?', [username]);
+        if (userRows.length > 0) {
+            return res.status(400).json({ success: false, message: 'Username sudah digunakan oleh warung lain.' });
+        }
+
+        // Simpan warung baru beserta username, password, dan is_open (Default: 1 / Buka) ke database
         const [result] = await pool.query(
-            'INSERT INTO shops (shop_name, owner_name, slug) VALUES (?, ?, ?)',
-            [shop_name, owner_name, slug]
+            'INSERT INTO shops (shop_name, owner_name, slug, username, password, is_open) VALUES (?, ?, ?, ?, ?, 1)',
+            [shop_name, owner_name, slug, username, password]
         );
 
         res.status(201).json({
             success: true,
             message: 'Warung berhasil didaftarkan!',
-            data: { id: result.insertId, shop_name, slug }
+            data: { id: result.insertId, shop_name, slug, username }
         });
     } catch (error) {
         console.error("Error saat mendaftarkan warung:", error);
@@ -160,8 +169,9 @@ app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
     try {
         const { nama_produk, harga, kategori, deskripsi, shop } = req.body; // 'shop' berisi slug warung dari frontend
         
-        // Cari ID warung berdasarkan slug-nya
+        // 🚨 PERBAIKAN: Menggunakan objek 'pool' secara langsung alih-alih variabel 'connection' yang tidak terdefinisi
         const shopId = await getShopIdBySlug(pool, shop);
+        
         if (!shopId) {
             return res.status(404).json({ success: false, message: 'Warung tidak terdaftar atau parameter shop tidak valid.' });
         }
@@ -401,7 +411,7 @@ app.get('/api/products', async (req, res) => {
         });
     } catch (error) {
         console.error("Error ambil data produk:", error);
-        res.status(500).json({ success: false, message: "Gagal mengambil daftar produk dari database" });
+        res.status(500).json({ success: false, message: "Gagal mengambil daftar daftar produk dari database" });
     }
 });
 
@@ -429,7 +439,6 @@ app.put('/api/products/:id/toggle-available', async (req, res) => {
         res.status(500).json({ success: false, message: "Gagal memperbarui status produk" });
     }
 });
-
 // Menggunakan port dari Railway, jika tidak ada baru gunakan 3000 (untuk lokal)
 const PORT = process.env.PORT || 3000;
 
