@@ -14,9 +14,9 @@ app.use(express.json());
 
 // CONFIGURATION DATABASE MYSQL (XAMPP)
 const dbConfig = {
-    host: '172.16.12.187',
-    user: 'promis_manager',      
-    password: 'promis_system',      
+    host: 'hayabusa.proxy.rlwy.net',
+    user: 'root',      
+    password: 'bQJkvxVCYjzQsTjSXySibRILeBXMQvko',      
     database: 'beda', 
 };
 
