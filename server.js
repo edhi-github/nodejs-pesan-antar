@@ -74,6 +74,47 @@ async function getShopIdBySlug(connectionOrPool, slug) {
     return rows.length > 0 ? rows[0].id : null;
 }
 
+// ==========================================
+// ENDPOINT BARU: AUTENTIKASI LOGIN (POST)
+// ==========================================
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+
+        // Validasi input kosong
+        if (!username || !password) {
+            return res.status(400).json({ success: false, message: 'Username dan password wajib diisi!' });
+        }
+
+        // Cari toko berdasarkan username di tabel 'shops'
+        const [rows] = await pool.query('SELECT * FROM shops WHERE username = ?', [username]);
+
+        // Jika username tidak ditemukan
+        if (rows.length === 0) {
+            return res.status(401).json({ success: false, message: 'Username atau password salah.' });
+        }
+
+        const shop = rows[0];
+
+        // Validasi Password (String biasa sesuai kebutuhan pengujian saat ini)
+        if (shop.password !== password) {
+            return res.status(401).json({ success: false, message: 'Username atau password salah.' });
+        }
+
+        // Jika login sukses, kembalikan data esensial ke frontend
+        res.json({
+            success: true,
+            message: 'Login berhasil!',
+            shop_id: shop.id,
+            shop_name: shop.shop_name,
+            slug: shop.slug
+        });
+
+    } catch (error) {
+        console.error("Error saat login:", error);
+        res.status(500).json({ success: false, message: 'Terjadi kesalahan internal server: ' + error.message });
+    }
+});
 
 // ==========================================
 // ENDPOINT BARU: PENDAFTARAN WARUNG (POST)
