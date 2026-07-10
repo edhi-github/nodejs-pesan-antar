@@ -389,7 +389,9 @@ app.put('/api/products/:id/toggle-available', async (req, res) => {
     }
 });
 
-// Jalankan Satu Server Terpadu di IP Lokal
+// Menggunakan port dari Railway, jika tidak ada baru gunakan 3000 (untuk lokal)
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server Multi-Warung Terbuka di Jaringan: http://172.16.12.187:${PORT}`);
+    console.log(`Server berjalan di port ${PORT}`);
 });
