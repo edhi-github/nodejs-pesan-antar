@@ -13,7 +13,7 @@ app.use(express.json());
 
 // CONFIGURATION DATABASE MYSQL (XAMPP)
 const dbConfig = {
-    host: process.env.MYSQLHOST || 'hayabusa.proxy.rlwy.net',
+    host: process.env.MYSQLHOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || 'root',      
     password: process.env.MYSQLPASSWORD || 'bQJkvxVCYjzQsTjSXySibRILeBXMQvko',      
     database: process.env.MYSQL_DATABASE || 'beda', // Mengambil 'beda' dari environment variable
