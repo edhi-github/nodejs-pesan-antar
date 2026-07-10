@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require('mysql2/promise'); // Menggunakan mysql2 dengan fitur Promise (async/await)
+const mysql = require('mysql2/promise'); 
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
@@ -7,8 +7,15 @@ const fs = require('fs');
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// 1. HAPUS baris "const PORT = 3000;" yang ada di sini sebelumnya!
+
+// 2. Perbarui middleware CORS dengan opsi eksplisit agar lebih aman di production
+app.use(cors({
+    origin: '*', // Mengizinkan semua frontend (termasuk beda-pesanantar.up.railway.app)
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 // CONFIGURATION DATABASE MYSQL (XAMPP)
