@@ -13,10 +13,11 @@ app.use(express.json());
 
 // CONFIGURATION DATABASE MYSQL (XAMPP)
 const dbConfig = {
-    host: 'hayabusa.proxy.rlwy.net',
-    user: 'root',      
-    password: 'bQJkvxVCYjzQsTjSXySibRILeBXMQvko',      
-    database: 'beda', 
+    host: process.env.MYSQLHOST || 'hayabusa.proxy.rlwy.net',
+    user: process.env.MYSQLUSER || 'root',      
+    password: process.env.MYSQLPASSWORD || 'bQJkvxVCYjzQsTjSXySibRILeBXMQvko',      
+    database: process.env.MYSQL_DATABASE || 'beda', // Mengambil 'beda' dari environment variable
+    port: process.env.MYSQLPORT || 3306
 };
 
 // Hubungkan ke database dengan sistem Pool agar koneksi stabil
