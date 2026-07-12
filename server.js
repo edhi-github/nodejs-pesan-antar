@@ -32,10 +32,10 @@ const pool = mysql.createPool(dbConfig);
 // ==========================================
 const s3 = new S3Client({
     region: 'auto',
-    endpoint: 'https://166f1c4f9ca5c894c66e1c314de9f990.r2.cloudflarestorage.com', // Contoh: https://<account_id>.r2.cloudflarestorage.com
+    endpoint: process.env.R2_ENDPOINT, // Contoh: https://<account_id>.r2.cloudflarestorage.com
     credentials: {
-        accessKeyId: '6d243557adfaa12918f256128a2f8700',
-        secretAccessKey: '4bc4b0f6dfd8fb9edab776955dd0acf7c1b5221b970fd116b9880af377679135',
+        accessKeyId: process.env.R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
     },
 });
 
