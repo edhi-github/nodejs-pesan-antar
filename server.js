@@ -3,50 +3,44 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3'); // Tambahan untuk R2
+const crypto = require('crypto'); // Tambahan untuk penamaan file acak
 
 const app = express();
 
-// 1. HAPUS baris "const PORT = 3000;" yang ada di sini sebelumnya!
-
-// 2. Perbarui middleware CORS dengan opsi eksplisit agar lebih aman di production
 app.use(cors({
-    origin: '*', // Mengizinkan semua frontend (termasuk beda-pesanantar.up.railway.app)
+    origin: '*', 
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
 
-// CONFIGURATION DATABASE MYSQL (XAMPP)
+// CONFIGURATION DATABASE MYSQL
 const dbConfig = {
     host: process.env.MYSQLHOST || 'mysql.railway.internal',
     user: process.env.MYSQLUSER || 'root',      
     password: process.env.MYSQLPASSWORD || 'bQJkvxVCYjzQsTjSXySibRILeBXMQvko',      
-    database: process.env.MYSQL_DATABASE || 'beda', // Mengambil 'beda' dari environment variable
+    database: process.env.MYSQL_DATABASE || 'beda', 
     port: process.env.MYSQLPORT || 3306
 };
 
-// Hubungkan ke database dengan sistem Pool agar koneksi stabil
 const pool = mysql.createPool(dbConfig);
 
-// Pastikan folder 'uploads' otomatis terbuat jika belum ada
-const dir = './uploads';
-if (!fs.existsSync(dir)){
-    fs.mkdirSync(dir);
-}
-
 // ==========================================
-// CONFIGURATION MULTER (UNGGAH GAMBAR)
+// CONFIGURATION CLOUDFLARE R2 (S3-COMPATIBLE)
 // ==========================================
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, 'uploads/'); 
+const s3 = new S3Client({
+    region: 'auto',
+    endpoint: 'https://166f1c4f9ca5c894c66e1c314de9f990.r2.cloudflarestorage.com', // Contoh: https://<account_id>.r2.cloudflarestorage.com
+    credentials: {
+        accessKeyId: '6d243557adfaa12918f256128a2f8700',
+        secretAccessKey: '4bc4b0f6dfd8fb9edab776955dd0acf7c1b5221b970fd116b9880af377679135',
     },
-    filename: function (req, file, cb) {
-        cb(null, file.fieldname + '-' + Date.now() + path.extname(file.originalname));
-    }
 });
+
+// Gunakan memoryStorage agar file tidak disimpan di hardisk Railway, melainkan di RAM sementara
+const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -58,23 +52,17 @@ const fileFilter = (req, file, cb) => {
 
 const upload = multer({ storage: storage, fileFilter: fileFilter });
 
-// Buat folder 'uploads' dapat diakses secara publik lewat browser/frontend
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
 
 // ==========================================
 // FUNGSIONALITAS HELPER MULTI-TENANT
 // ==========================================
-
-// Helper untuk membuat slug otomatis dari nama warung (Contoh: "Warung Bu Kris" -> "warung-bu-kris")
 function generateSlug(text) {
     return text.toString().toLowerCase().trim()
-        .replace(/\s+/g, '-')           // Ganti spasi dengan -
-        .replace(/[^\w\-]+/g, '')       // Hapus karakter non-word
-        .replace(/\-\-+/g, '-');        // Ganti multi - dengan tunggal -
+        .replace(/\s+/g, '-')           
+        .replace(/[^\w\-]+/g, '')       
+        .replace(/\-\-+/g, '-');        
 }
 
-// Helper untuk validasi slug warung dan mengambil ID warung aslinya
 async function getShopIdBySlug(connectionOrPool, slug) {
     if (!slug) return null;
     const [rows] = await connectionOrPool.query('SELECT id FROM shops WHERE slug = ?', [slug]);
@@ -83,33 +71,28 @@ async function getShopIdBySlug(connectionOrPool, slug) {
 
 
 // ==========================================
-// ENDPOINT BARU: AUTENTIKASI LOGIN (POST)
+// ENDPOINT: AUTENTIKASI LOGIN (POST)
 // ==========================================
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        // Validasi input kosong
         if (!username || !password) {
             return res.status(400).json({ success: false, message: 'Username dan password wajib diisi!' });
         }
 
-        // Cari toko berdasarkan username di tabel 'shops'
         const [rows] = await pool.query('SELECT * FROM shops WHERE username = ?', [username]);
 
-        // Jika username tidak ditemukan
         if (rows.length === 0) {
             return res.status(401).json({ success: false, message: 'Username atau password salah.' });
         }
 
         const shop = rows[0];
 
-        // Validasi Password (String biasa sesuai kebutuhan pengujian saat ini)
         if (shop.password !== password) {
             return res.status(401).json({ success: false, message: 'Username atau password salah.' });
         }
 
-        // Jika login sukses, kembalikan data esensial ke frontend
         res.json({
             success: true,
             message: 'Login berhasil!',
@@ -138,19 +121,16 @@ app.post('/api/shops/register', async (req, res) => {
 
         let slug = generateSlug(shop_name);
 
-        // Cek apakah slug sudah dipakai warung lain, jika ya tambahkan angka acak di belakangnya
         const [slugRows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [slug]);
         if (slugRows.length > 0) {
             slug = `${slug}-${Math.floor(1000 + Math.random() * 9000)}`;
         }
 
-        // Cek apakah username sudah dipakai oleh warung lain
         const [userRows] = await pool.query('SELECT id FROM shops WHERE username = ?', [username]);
         if (userRows.length > 0) {
             return res.status(400).json({ success: false, message: 'Username sudah digunakan oleh warung lain.' });
         }
 
-        // Simpan warung baru beserta username, password, dan is_open (Default: 1 / Buka) ke database
         const [result] = await pool.query(
             'INSERT INTO shops (shop_name, owner_name, slug, username, password, is_open) VALUES (?, ?, ?, ?, ?, 1)',
             [shop_name, owner_name, slug, username, password]
@@ -169,53 +149,63 @@ app.post('/api/shops/register', async (req, res) => {
 
 
 // ==========================================
-// ENDPOINT: TAMBAH PRODUK BARU (POST) - MULTI-TENANT
+// ENDPOINT: TAMBAH PRODUK BARU (POST) - CLOUDFLARE R2 INTEGRATION
 // ==========================================
 app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
     try {
-        const { nama_produk, harga, kategori, deskripsi, shop } = req.body; // 'shop' berisi slug warung dari frontend
+        const { nama_produk, harga, kategori, deskripsi, shop } = req.body; 
         
-        // 🚨 PERBAIKAN: Menggunakan objek 'pool' secara langsung alih-alih variabel 'connection' yang tidak terdefinisi
         const shopId = await getShopIdBySlug(pool, shop);
-        
         if (!shopId) {
             return res.status(404).json({ success: false, message: 'Warung tidak terdaftar atau parameter shop tidak valid.' });
         }
 
-        // Cek apakah file foto berhasil diunggah
         if (!req.file) {
             return res.status(400).json({ success: false, message: 'Foto produk wajib diunggah.' });
         }
 
-        // Jalur url foto yang disimpan ke database
-        const urlFoto = `/uploads/${req.file.filename}`;
+        // --- PROSES UPLOAD KE CLOUDFLARE R2 ---
+        const fileExtension = req.file.originalname.split('.').pop();
+        const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
 
-        // PROSES SIMPAN KE DATABASE MYSQL (Tabel products disertai shop_id)
+        const uploadParams = {
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: uniqueFilename,
+            Body: req.file.buffer, // Mengambil buffer data dari memoryStorage
+            ContentType: req.file.mimetype,
+        };
+
+        // Eksekusi kirim ke Cloudflare R2
+        await s3.send(new PutObjectCommand(uploadParams));
+
+        // Gabungkan URL publik Cloudflare dengan nama file unik
+        const urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+
+        // SIMPAN KE DATABASE MYSQL (Sekarang menggunakan urlFoto dari Cloudflare)
         const queryText = `
             INSERT INTO products (shop_id, name, price, category, description, image_url) 
             VALUES (?, ?, ?, ?, ?, ?)
         `;
         
-        // Eksekusi query menggunakan pool
         await pool.query(queryText, [shopId, nama_produk, harga, kategori, deskripsi || '', urlFoto]);
 
-        console.log('Produk Baru Berhasil Disimpan:', { shopId, nama_produk, harga, kategori, urlFoto });
+        console.log('Produk Baru Berhasil Disimpan ke R2:', { shopId, nama_produk, urlFoto });
 
         res.status(201).json({
             success: true,
-            message: 'Produk baru berhasil ditambahkan ke database!',
+            message: 'Produk baru berhasil ditambahkan dan disimpan di Cloudflare R2!',
             data: { shop_id: shopId, nama_produk, harga, kategori, deskripsi, foto: urlFoto }
         });
 
     } catch (error) {
         console.error("Error saat menyimpan produk:", error);
-        res.status(500).json({ success: false, message: "Gagal menyimpan produk ke database: " + error.message });
+        res.status(500).json({ success: false, message: "Gagal menyimpan produk: " + error.message });
     }
 });
 
 
 // ==========================================
-// ENDPOINT 1: PEMBELI MENGIRIM PESANAN (POST) - MULTI-TENANT
+// ENDPOINT: PEMBELI MENGIRIM PESANAN (POST)
 // ==========================================
 app.post('/api/orders', async (req, res) => {
     const { customer_name, customer_phone, table_or_address, total_price, items, shop } = req.body;
@@ -227,7 +217,6 @@ app.post('/api/orders', async (req, res) => {
     const connection = await pool.getConnection();
 
     try {
-        // Cari ID warung berdasarkan slug-nya
         const shopId = await getShopIdBySlug(connection, shop);
         if (!shopId) {
             return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
@@ -274,7 +263,7 @@ app.post('/api/orders', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 2: PENJUAL MELIHAT ANTREAN (GET) - MULTI-TENANT
+// ENDPOINT: PENJUAL MELIHAT ANTREAN (GET)
 // ==========================================
 app.get('/api/orders/active', async (req, res) => {
     try {
@@ -326,7 +315,7 @@ app.get('/api/orders/active', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 3: PENJUAL KLIK SELESAI (PATCH)
+// ENDPOINT: PENJUAL KLIK SELESAI (PATCH)
 // ==========================================
 app.patch('/api/orders/:id/complete', async (req, res) => {
     const orderId = req.params.id;
@@ -346,7 +335,7 @@ app.patch('/api/orders/:id/complete', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT 4: PENJUAL MELIHAT RIWAYAT (GET) - MULTI-TENANT
+// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET)
 // ==========================================
 app.get('/api/orders/history', async (req, res) => {
     try {
@@ -398,7 +387,7 @@ app.get('/api/orders/history', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT: AMBIL SEMUA PRODUK UNTUK PEMBELI (GET) - MULTI-TENANT
+// ENDPOINT: AMBIL SEMUA PRODUK UNTUK PEMBELI (GET)
 // ==========================================
 app.get('/api/products', async (req, res) => {
     try {
@@ -408,7 +397,6 @@ app.get('/api/products', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan.", data: [] });
         }
 
-        // Ambil data produk yang hanya milik warung terpilih
         const [rows] = await pool.query('SELECT * FROM products WHERE shop_id = ? ORDER BY id DESC', [shopId]);
         
         res.json({
@@ -424,7 +412,7 @@ app.get('/api/products', async (req, res) => {
 // ENDPOINT UNTUK MENGUBAH STATUS KETERSEDIAAN PRODUK (ADMIN)
 app.put('/api/products/:id/toggle-available', async (req, res) => {
     const productId = req.params.id;
-    const { is_available } = req.body; // Menerima nilai 1 atau 0
+    const { is_available } = req.body; 
 
     try {
         const [result] = await pool.query(
@@ -445,7 +433,7 @@ app.put('/api/products/:id/toggle-available', async (req, res) => {
         res.status(500).json({ success: false, message: "Gagal memperbarui status produk" });
     }
 });
-// Menggunakan port dari Railway, jika tidak ada baru gunakan 3000 (untuk lokal)
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
