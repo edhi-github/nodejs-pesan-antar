@@ -52,6 +52,31 @@ const fileFilter = (req, file, cb) => {
 
 const upload = multer({ storage: storage, fileFilter: fileFilter });
 
+const { GetObjectCommand } = require("@aws-sdk/client-s3"); // Pastikan import ini ada di atas
+
+// ENDPOINT PROXY UNTUK MENGAMBIL GAMBAR DARI R2
+app.get('/api/images/:filename', async (req, res) => {
+    try {
+        const { filename } = req.params;
+
+        const command = new GetObjectCommand({
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: filename,
+        });
+
+        const response = await s3.send(command);
+        
+        // Atur Content-Type sesuai tipe gambar (png/jpeg)
+        res.setHeader('Content-Type', response.ContentType || 'image/jpeg');
+        
+        // Alirkan (pipe) data gambar langsung ke browser frontend
+        response.Body.pipe(res);
+    } catch (error) {
+        console.error("Gagal mengambil gambar dari R2:", error);
+        res.status(404).send("Gambar tidak ditemukan");
+    }
+});
+
 
 // ==========================================
 // FUNGSIONALITAS HELPER MULTI-TENANT
