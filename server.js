@@ -3,7 +3,8 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3'); // Tambahan untuk R2
+//const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3'); // Tambahan untuk R2
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const crypto = require('crypto'); // Tambahan untuk penamaan file acak
 
 const app = express();
@@ -51,8 +52,6 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({ storage: storage, fileFilter: fileFilter });
-
-const { GetObjectCommand } = require("@aws-sdk/client-s3"); // Pastikan import ini ada di atas
 
 // ENDPOINT PROXY UNTUK MENGAMBIL GAMBAR DARI R2
 app.get('/api/images/:filename', async (req, res) => {
