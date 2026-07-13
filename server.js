@@ -427,7 +427,7 @@ app.put('/api/products/:id/toggle-available', async (req, res) => {
 
         res.json({
             success: true,
-            message: `Status produk berhasil diperbarui menjadi ${is_available == 1 ? 'Tersedia' : 'Habis'}`
+            message: `Status produk berhasil diperbarui menjadi ${is_available == 1 ? 'Tersedia' : 'Kosong'}`
         });
     } catch (error) {
         console.error("Error update status produk:", error);
