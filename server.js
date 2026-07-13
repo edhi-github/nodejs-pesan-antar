@@ -42,16 +42,16 @@ const s3 = new S3Client({
 // Gunakan memoryStorage agar file tidak disimpan di hardisk Railway, melainkan di RAM sementara
 const storage = multer.memoryStorage();
 
+// PERBAIKAN FILTER: Diperbarui agar mendukung file Gambar DAN PDF untuk bukti pembayaran
 const fileFilter = (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
+    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
         cb(null, true);
     } else {
-        cb(new Error('Hanya file gambar yang diizinkan!'), false);
+        cb(new Error('Hanya file gambar dan PDF yang diizinkan!'), false);
     }
 };
 
 const upload = multer({ storage: storage, fileFilter: fileFilter });
-
 
 
 // ==========================================
@@ -172,17 +172,14 @@ app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
         const uploadParams = {
             Bucket: process.env.R2_BUCKET_NAME,
             Key: uniqueFilename,
-            Body: req.file.buffer, // Mengambil buffer data dari memoryStorage
+            Body: req.file.buffer, 
             ContentType: req.file.mimetype,
         };
 
-        // Eksekusi kirim ke Cloudflare R2
         await s3.send(new PutObjectCommand(uploadParams));
 
-        // Gabungkan URL publik Cloudflare dengan nama file unik
         const urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
 
-        // SIMPAN KE DATABASE MYSQL (Sekarang menggunakan urlFoto dari Cloudflare)
         const queryText = `
             INSERT INTO products (shop_id, name, price, category, description, image_url) 
             VALUES (?, ?, ?, ?, ?, ?)
@@ -206,13 +203,26 @@ app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
 
 
 // ==========================================
-// ENDPOINT: PEMBELI MENGIRIM PESANAN (POST)
+// PERUBAHAN UTAMA: ENDPOINT PEMBELI MENGIRIM PESANAN + BUKTI BAYAR R2
 // ==========================================
-app.post('/api/orders', async (req, res) => {
+app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
+    // Karena menggunakan FormData, data teks ada di req.body
     const { customer_name, customer_phone, table_or_address, total_price, items, shop } = req.body;
 
-    if (!items || items.length === 0) {
+    // Data items bertipe string (hasil stringify frontend), maka harus diparse kembali menjadi Array Objek
+    let parsedItems = [];
+    try {
+        parsedItems = typeof items === 'string' ? JSON.parse(items) : items;
+    } catch (e) {
+        return res.status(400).json({ success: false, message: "Format item pesanan tidak valid." });
+    }
+
+    if (!parsedItems || parsedItems.length === 0) {
         return res.status(400).json({ success: false, message: "Keranjang belanja kosong" });
+    }
+
+    if (!req.file) {
+        return res.status(400).json({ success: false, message: "Bukti pembayaran wajib diunggah." });
     }
 
     const connection = await pool.getConnection();
@@ -223,13 +233,36 @@ app.post('/api/orders', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
         }
 
+        // --- PROSES UPLOAD BUKTI BAYAR KE CLOUDFLARE R2 ---
+        const fileExtension = req.file.originalname.split('.').pop();
+        const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+        const uploadParams = {
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: uniqueFilename,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+        };
+
+        // Kirim bukti bayar ke Cloudflare R2
+        await s3.send(new PutObjectCommand(uploadParams));
+        const urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+
         await connection.beginTransaction();
 
+        // Query menyimpan order (Pastikan kolom payment_proof_url sudah ada di tabel orders Anda)
         const orderQuery = `
-            INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, status)
-            VALUES (?, ?, ?, ?, ?, 'baru')
+            INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, status, payment_proof_url)
+            VALUES (?, ?, ?, ?, ?, 'baru', ?)
         `;
-        const [orderResult] = await connection.query(orderQuery, [shopId, customer_name, customer_phone, table_or_address, total_price]);
+        const [orderResult] = await connection.query(orderQuery, [
+            shopId, 
+            customer_name, 
+            customer_phone, 
+            table_or_address, 
+            total_price, 
+            urlBuktiBayar
+        ]);
         
         const newOrderId = orderResult.insertId; 
 
@@ -238,7 +271,7 @@ app.post('/api/orders', async (req, res) => {
             VALUES (?, ?, ?, ?, ?)
         `;
 
-        for (let item of items) {
+        for (let item of parsedItems) {
             const product_id = item.product_id || 1;
             const subtotal = item.harga;
             const notes = item.catatan || '';
@@ -250,14 +283,15 @@ app.post('/api/orders', async (req, res) => {
 
         res.status(201).json({
             success: true,
-            message: "Pesanan berhasil masuk ke antrean dapur!",
-            order_id: newOrderId
+            message: "Pesanan & bukti pembayaran berhasil dikirim!",
+            order_id: newOrderId,
+            payment_proof: urlBuktiBayar
         });
 
     } catch (error) {
         await connection.rollback();
-        console.error("Error saat simpan pesanan:", error);
-        res.status(500).json({ success: false, message: "Gagal memproses pesanan di server" });
+        console.error("Error saat simpan pesanan + upload bukti:", error);
+        res.status(500).json({ success: false, message: "Gagal memproses pesanan di server: " + error.message });
     } finally {
         connection.release();
     }
@@ -274,10 +308,11 @@ app.get('/api/orders/active', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
+        // PERUBAHAN: Menambahkan o.payment_proof_url ke query agar admin bisa melihat bukti bayar
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
-                o.total_price, o.status, o.created_at,
+                o.total_price, o.status, o.created_at, o.payment_proof_url,
                 p.name AS nama_makanan, oi.quantity, oi.notes AS catatan_item
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
@@ -298,6 +333,7 @@ app.get('/api/orders/active', async (req, res) => {
                     total_price: row.total_price,
                     status: row.status,
                     created_at: row.created_at,
+                    payment_proof_url: row.payment_proof_url, // Dimasukkan ke payload response
                     items: []
                 };
             }
@@ -346,10 +382,11 @@ app.get('/api/orders/history', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
+        // PERUBAHAN: Menambahkan o.payment_proof_url ke query riwayat
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
-                o.total_price, o.status, o.created_at,
+                o.total_price, o.status, o.created_at, o.payment_proof_url,
                 p.name AS nama_makanan, oi.quantity, oi.notes AS catatan_item
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
@@ -370,6 +407,7 @@ app.get('/api/orders/history', async (req, res) => {
                     total_price: row.total_price,
                     status: row.status,
                     created_at: row.created_at,
+                    payment_proof_url: row.payment_proof_url,
                     items: []
                 };
             }
