@@ -474,9 +474,12 @@ app.get('/api/shops/status', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
+        // Paksa convert ke Number (0 atau 1) untuk menghindari konflik tipe data di frontend
+        const isOpenStatus = Number(rows[0].is_open);
+
         res.json({
             success: true,
-            is_open: rows[0].is_open,
+            is_open: isOpenStatus,
             shop_name: rows[0].shop_name
         });
     } catch (error) {
@@ -499,13 +502,16 @@ app.put('/api/shops/toggle-status', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
+        // Paksa convert input ke Number (0 atau 1)
+        const statusBaru = Number(is_open) === 1 ? 1 : 0;
+
         // Jalankan query update status
         await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [is_open, shopId]);
 
         res.json({
             success: true,
             message: `Status warung berhasil diubah menjadi ${is_open == 1 ? 'Buka' : 'Tutup'}`,
-            is_open: is_open
+            is_open: statusBaru
         });
     } catch (error) {
         console.error("Error update status warung:", error);
