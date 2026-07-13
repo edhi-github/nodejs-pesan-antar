@@ -419,15 +419,63 @@ app.get('/api/products', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan.", data: [] });
         }
 
-        const [rows] = await pool.query('SELECT * FROM products WHERE shop_id = ? ORDER BY id DESC', [shopId]);
+        // PERBAIKAN: Lakukan JOIN dengan tabel shops untuk mendapatkan nilai is_open terbaru warung tersebut
+        const queryText = `
+            SELECT p.*, s.is_open AS shop_status 
+            FROM products p 
+            JOIN shops s ON p.shop_id = s.id 
+            WHERE p.shop_id = ? 
+            ORDER BY p.id DESC
+        `;
+        const [rows] = await pool.query(queryText, [shopId]);
         
+        // Ambil status toko dari baris pertama (jika ada produk) atau query terpisah
+        let isOpenStatus = 1;
+        if (rows.length > 0) {
+            isOpenStatus = Number(rows[0].shop_status);
+        } else {
+            const [shopRows] = await pool.query('SELECT is_open FROM shops WHERE id = ?', [shopId]);
+            if (shopRows.length > 0) isOpenStatus = Number(shopRows[0].is_open);
+        }
+
         res.json({
             success: true,
+            is_open: isOpenStatus, // Disisipkan di root response agar dibaca index.html
             data: rows
         });
     } catch (error) {
         console.error("Error ambil data produk:", error);
-        res.status(500).json({ success: false, message: "Gagal mengambil daftar daftar produk dari database" });
+        res.status(500).json({ success: false, message: "Gagal mengambil daftar produk dari database" });
+    }
+});
+
+// 2. Endpoint untuk mengubah status warung secara dinamis (Toggle Buka/Tutup)
+app.put('/api/shops/toggle-status', async (req, res) => {
+    try {
+        const { shop, is_open } = req.body; 
+
+        if (!shop) {
+            return res.status(400).json({ success: false, message: "Parameter shop wajib diisi." });
+        }
+
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        const statusBaru = Number(is_open) === 1 ? 1 : 0;
+
+        // PERBAIKAN: Ambil variabel statusBaru yang sudah dikonversi dengan aman, dan samakan nama parameternya
+        await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [statusBaru, shopId]);
+
+        res.json({
+            success: true,
+            message: `Status warung berhasil diubah menjadi ${statusBaru == 1 ? 'Buka' : 'Tutup'}`,
+            is_open: statusBaru
+        });
+    } catch (error) {
+        console.error("Error update status warung:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui status warung" });
     }
 });
 
