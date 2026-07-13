@@ -32,17 +32,15 @@ const pool = mysql.createPool(dbConfig);
 // ==========================================
 const s3 = new S3Client({
     region: 'auto',
-    endpoint: process.env.R2_ENDPOINT, // Contoh: https://<account_id>.r2.cloudflarestorage.com
+    endpoint: process.env.R2_ENDPOINT, 
     credentials: {
         accessKeyId: process.env.R2_ACCESS_KEY_ID,
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
     },
 });
 
-// Gunakan memoryStorage agar file tidak disimpan di hardisk Railway, melainkan di RAM sementara
 const storage = multer.memoryStorage();
 
-// PERBAIKAN FILTER: Diperbarui agar mendukung file Gambar DAN PDF untuk bukti pembayaran
 const fileFilter = (req, file, cb) => {
     if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
         cb(null, true);
@@ -150,7 +148,7 @@ app.post('/api/shops/register', async (req, res) => {
 
 
 // ==========================================
-// ENDPOINT: TAMBAH PRODUK BARU (POST) - CLOUDFLARE R2 INTEGRATION
+// ENDPOINT: TAMBAH PRODUK BARU (POST)
 // ==========================================
 app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
     try {
@@ -165,7 +163,6 @@ app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
             return res.status(400).json({ success: false, message: 'Foto produk wajib diunggah.' });
         }
 
-        // --- PROSES UPLOAD KE CLOUDFLARE R2 ---
         const fileExtension = req.file.originalname.split('.').pop();
         const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
 
@@ -187,8 +184,6 @@ app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
         
         await pool.query(queryText, [shopId, nama_produk, harga, kategori, deskripsi || '', urlFoto]);
 
-        console.log('Produk Baru Berhasil Disimpan ke R2:', { shopId, nama_produk, urlFoto });
-
         res.status(201).json({
             success: true,
             message: 'Produk baru berhasil ditambahkan dan disimpan di Cloudflare R2!',
@@ -203,13 +198,11 @@ app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
 
 
 // ==========================================
-// PERUBAHAN UTAMA: ENDPOINT PEMBELI MENGIRIM PESANAN + BUKTI BAYAR R2
+// ENDPOINT: PEMBELI MENGIRIM PESANAN + BUKTI BAYAR
 // ==========================================
 app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
-    // Karena menggunakan FormData, data teks ada di req.body
     const { customer_name, customer_phone, table_or_address, total_price, items, shop } = req.body;
 
-    // Data items bertipe string (hasil stringify frontend), maka harus diparse kembali menjadi Array Objek
     let parsedItems = [];
     try {
         parsedItems = typeof items === 'string' ? JSON.parse(items) : items;
@@ -233,7 +226,6 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
         }
 
-        // --- PROSES UPLOAD BUKTI BAYAR KE CLOUDFLARE R2 ---
         const fileExtension = req.file.originalname.split('.').pop();
         const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
 
@@ -244,24 +236,17 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
             ContentType: req.file.mimetype,
         };
 
-        // Kirim bukti bayar ke Cloudflare R2
         await s3.send(new PutObjectCommand(uploadParams));
         const urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
 
         await connection.beginTransaction();
 
-        // Query menyimpan order (Pastikan kolom payment_proof_url sudah ada di tabel orders Anda)
         const orderQuery = `
             INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, status, payment_proof_url)
             VALUES (?, ?, ?, ?, ?, 'baru', ?)
         `;
         const [orderResult] = await connection.query(orderQuery, [
-            shopId, 
-            customer_name, 
-            customer_phone, 
-            table_or_address, 
-            total_price, 
-            urlBuktiBayar
+            shopId, customer_name, customer_phone, table_or_address, total_price, urlBuktiBayar
         ]);
         
         const newOrderId = orderResult.insertId; 
@@ -308,7 +293,6 @@ app.get('/api/orders/active', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
-        // PERUBAHAN: Menambahkan o.payment_proof_url ke query agar admin bisa melihat bukti bayar
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
@@ -333,7 +317,7 @@ app.get('/api/orders/active', async (req, res) => {
                     total_price: row.total_price,
                     status: row.status,
                     created_at: row.created_at,
-                    payment_proof_url: row.payment_proof_url, // Dimasukkan ke payload response
+                    payment_proof_url: row.payment_proof_url, 
                     items: []
                 };
             }
@@ -382,7 +366,6 @@ app.get('/api/orders/history', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
-        // PERUBAHAN: Menambahkan o.payment_proof_url ke query riwayat
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
@@ -472,6 +455,66 @@ app.put('/api/products/:id/toggle-available', async (req, res) => {
         res.status(500).json({ success: false, message: "Gagal memperbarui status produk" });
     }
 });
+
+
+// =========================================================================
+// TAMBAHAN BARU: ENDPOINT UNTUK MANAJEMEN STATUS WARUNG (is_open)
+// =========================================================================
+
+// 1. Endpoint untuk mendapatkan status warung saat ini (Buka/Tutup)
+app.get('/api/shops/status', async (req, res) => {
+    try {
+        const shopSlug = req.query.shop; // Dikirim dari frontend via query string (?shop=nama-warung)
+        if (!shopSlug) {
+            return res.status(400).json({ success: false, message: "Parameter shop wajib disertakan." });
+        }
+
+        const [rows] = await pool.query('SELECT is_open, shop_name FROM shops WHERE slug = ?', [shopSlug]);
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        res.json({
+            success: true,
+            is_open: rows[0].is_open,
+            shop_name: rows[0].shop_name
+        });
+    } catch (error) {
+        console.error("Error ambil status warung:", error);
+        res.status(500).json({ success: false, message: "Gagal mengambil status warung" });
+    }
+});
+
+// 2. Endpoint untuk mengubah status warung secara dinamis (Toggle Buka/Tutup)
+app.put('/api/shops/toggle-status', async (req, res) => {
+    try {
+        const { shop, is_open } = req.body; // Dikirim melalui body request JSON
+
+        if (!shop) {
+            return res.status(400).json({ success: false, message: "Parameter shop wajib diisi." });
+        }
+
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        // Jalankan query update status
+        await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [is_open, shopId]);
+
+        res.json({
+            success: true,
+            message: `Status warung berhasil diubah menjadi ${is_open == 1 ? 'Buka' : 'Tutup'}`,
+            is_open: is_open
+        });
+    } catch (error) {
+        console.error("Error update status warung:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui status warung" });
+    }
+});
+
+// =========================================================================
+
 
 const PORT = process.env.PORT || 3000;
 
