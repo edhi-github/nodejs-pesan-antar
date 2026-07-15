@@ -356,7 +356,7 @@ app.patch('/api/orders/:id/complete', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET)
+// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET) - SELESAI & REJECT
 // ==========================================
 app.get('/api/orders/history', async (req, res) => {
     try {
@@ -366,6 +366,7 @@ app.get('/api/orders/history', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
+        // Diubah agar memuat pesanan berstatus 'selesai' maupun 'reject'
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
@@ -374,7 +375,7 @@ app.get('/api/orders/history', async (req, res) => {
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
             JOIN products p ON oi.product_id = p.id
-            WHERE o.shop_id = ? AND o.status = 'selesai'
+            WHERE o.shop_id = ? AND o.status IN ('selesai', 'reject')
             ORDER BY o.created_at DESC;
         `;
         const [rows] = await pool.query(queryText, [shopId]);
