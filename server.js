@@ -650,6 +650,36 @@ app.post('/api/products/:id', upload.single('image'), async (req, res) => {
         res.status(500).json({ success: false, message: "Gagal memperbarui produk: " + error.message });
     }
 });
+
+// =========================================================================
+// ENDPOINT: UPDATE STATUS PESANAN DINAMIS (PATCH) - BARU, PROSES, REJECT, SELESAI
+// =========================================================================
+app.patch('/api/orders/:id/status', async (req, res) => {
+    const orderId = req.params.id;
+    const { status } = req.body; // Mengambil status baru ('proses', 'reject', 'selesai')
+
+    const validStatuses = ['baru', 'proses', 'reject', 'selesai'];
+    if (!validStatuses.includes(status)) {
+        return res.status(400).json({ success: false, message: "Status tidak valid." });
+    }
+
+    try {
+        const queryText = `UPDATE orders SET status = ? WHERE id = ?`;
+        const [result] = await pool.query(queryText, [status, orderId]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ success: false, message: "ID Pesanan tidak ditemukan" });
+        }
+
+        res.json({ 
+            success: true, 
+            message: `Status pesanan #${orderId} berhasil diubah menjadi ${status}!` 
+        });
+    } catch (error) {
+        console.error("Error update status pesanan:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui status pesanan di database." });
+    }
+});
 // =========================================================================
 
 
