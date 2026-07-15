@@ -567,6 +567,89 @@ app.put('/api/shops/toggle-status', async (req, res) => {
     }
 });
 
+// ==========================================
+// ENDPOINT: AMBIL DETAIL SATU PRODUK (GET)
+// ==========================================
+app.get('/api/products/:id', async (req, res) => {
+    try {
+        const productId = req.params.id;
+        const [rows] = await pool.query('SELECT * FROM products WHERE id = ?', [productId]);
+
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Produk tidak ditemukan.' });
+        }
+
+        res.json({
+            success: true,
+            data: rows[0]
+        });
+    } catch (error) {
+        console.error("Error saat mengambil detail produk:", error);
+        res.status(500).json({ success: false, message: 'Gagal mengambil detail produk: ' + error.message });
+    }
+});
+
+// ==========================================
+// ENDPOINT: UPDATE / EDIT PRODUK (POST/PUT)
+// ==========================================
+app.post('/api/products/:id', upload.single('image'), async (req, res) => {
+    try {
+        const productId = req.params.id;
+        // Baca data input (mensupport key bahasa Inggris 'name' maupun Indonesia 'nama_produk')
+        const name = req.body.name || req.body.nama_produk;
+        const price = req.body.price || req.body.harga;
+        const category = req.body.category || req.body.kategori;
+        const description = req.body.description || req.body.deskripsi || '';
+        const shop = req.body.shop;
+
+        if (!name || !price || !category) {
+            return res.status(400).json({ success: false, message: 'Nama, harga, dan kategori wajib diisi.' });
+        }
+
+        // Pastikan produk ada di database
+        const [existingProduct] = await pool.query('SELECT image_url FROM products WHERE id = ?', [productId]);
+        if (existingProduct.length === 0) {
+            return res.status(404).json({ success: false, message: 'Produk tidak ditemukan.' });
+        }
+
+        let urlFoto = existingProduct[0].image_url; // Default gunakan foto lama
+
+        // Jika ada file foto baru yang diunggah, upload ke Cloudflare R2
+        if (req.file) {
+            const fileExtension = req.file.originalname.split('.').pop();
+            const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+            const uploadParams = {
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: uniqueFilename,
+                Body: req.file.buffer, 
+                ContentType: req.file.mimetype,
+            };
+
+            await s3.send(new PutObjectCommand(uploadParams));
+            urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+        }
+
+        // Lakukan query UPDATE ke database
+        const queryText = `
+            UPDATE products 
+            SET name = ?, price = ?, category = ?, description = ?, image_url = ?
+            WHERE id = ?
+        `;
+        
+        await pool.query(queryText, [name, price, category, description, urlFoto, productId]);
+
+        res.json({
+            success: true,
+            message: 'Produk berhasil diperbarui!',
+            data: { id: productId, name, price, category, description, image_url: urlFoto }
+        });
+
+    } catch (error) {
+        console.error("Error saat memperbarui produk:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui produk: " + error.message });
+    }
+});
 // =========================================================================
 
 
