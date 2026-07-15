@@ -355,9 +355,9 @@ app.patch('/api/orders/:id/complete', async (req, res) => {
     }
 });
 
-// ==========================================
-// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET) - SELESAI & REJECT
-// ==========================================
+// =========================================================================
+// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET) - KHUSUS SELESAI/REJECT HARI INI (BERDASARKAN UPDATED_AT)
+// =========================================================================
 app.get('/api/orders/history', async (req, res) => {
     try {
         const shopSlug = req.query.shop;
@@ -366,17 +366,20 @@ app.get('/api/orders/history', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
-        // Diubah agar memuat pesanan berstatus 'selesai' maupun 'reject'
+        // Sekarang kita menyaring berdasarkan 'updated_at' agar pesanan kemarin 
+        // yang baru diselesaikan/direject hari ini tetap muncul di riwayat hari ini.
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
-                o.total_price, o.status, o.created_at, o.payment_proof_url,
+                o.total_price, o.status, o.created_at, o.updated_at, o.payment_proof_url,
                 p.name AS nama_makanan, oi.quantity, oi.notes AS catatan_item
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
             JOIN products p ON oi.product_id = p.id
-            WHERE o.shop_id = ? AND o.status IN ('selesai', 'reject')
-            ORDER BY o.created_at DESC;
+            WHERE o.shop_id = ? 
+              AND o.status IN ('selesai', 'reject')
+              AND o.updated_at >= CURDATE()
+            ORDER BY o.updated_at DESC;
         `;
         const [rows] = await pool.query(queryText, [shopId]);
         
@@ -391,6 +394,7 @@ app.get('/api/orders/history', async (req, res) => {
                     total_price: row.total_price,
                     status: row.status,
                     created_at: row.created_at,
+                    updated_at: row.updated_at, // Kita bawa juga data updated_at ke frontend
                     payment_proof_url: row.payment_proof_url,
                     items: []
                 };
@@ -404,8 +408,8 @@ app.get('/api/orders/history', async (req, res) => {
 
         res.json(Object.values(ordersGrouped));
     } catch (error) {
-        console.error("Error ambil riwayat:", error);
-        res.status(500).json({ success: false, message: "Gagal mengambil data riwayat" });
+        console.error("Error ambil riwayat harian:", error);
+        res.status(500).json({ success: false, message: "Gagal mengambil data riwayat harian" });
     }
 });
 
