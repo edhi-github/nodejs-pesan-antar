@@ -147,140 +147,7 @@ app.post('/api/shops/register', async (req, res) => {
 });
 
 
-// ==========================================
-// ENDPOINT: TAMBAH PRODUK BARU (POST)
-// ==========================================
-app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
-    try {
-        const { nama_produk, harga, kategori, deskripsi, shop } = req.body; 
-        
-        const shopId = await getShopIdBySlug(pool, shop);
-        if (!shopId) {
-            return res.status(404).json({ success: false, message: 'Warung tidak terdaftar atau parameter shop tidak valid.' });
-        }
 
-        if (!req.file) {
-            return res.status(400).json({ success: false, message: 'Foto produk wajib diunggah.' });
-        }
-
-        const fileExtension = req.file.originalname.split('.').pop();
-        const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
-
-        const uploadParams = {
-            Bucket: process.env.R2_BUCKET_NAME,
-            Key: uniqueFilename,
-            Body: req.file.buffer, 
-            ContentType: req.file.mimetype,
-        };
-
-        await s3.send(new PutObjectCommand(uploadParams));
-
-        const urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
-
-        const queryText = `
-            INSERT INTO products (shop_id, name, price, category, description, image_url) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        `;
-        
-        await pool.query(queryText, [shopId, nama_produk, harga, kategori, deskripsi || '', urlFoto]);
-
-        res.status(201).json({
-            success: true,
-            message: 'Produk baru berhasil ditambahkan dan disimpan di Cloudflare R2!',
-            data: { shop_id: shopId, nama_produk, harga, kategori, deskripsi, foto: urlFoto }
-        });
-
-    } catch (error) {
-        console.error("Error saat menyimpan produk:", error);
-        res.status(500).json({ success: false, message: "Gagal menyimpan produk: " + error.message });
-    }
-});
-
-
-// ==========================================
-// ENDPOINT: PEMBELI MENGIRIM PESANAN + BUKTI BAYAR
-// ==========================================
-app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
-    const { customer_name, customer_phone, table_or_address, total_price, items, shop } = req.body;
-
-    let parsedItems = [];
-    try {
-        parsedItems = typeof items === 'string' ? JSON.parse(items) : items;
-    } catch (e) {
-        return res.status(400).json({ success: false, message: "Format item pesanan tidak valid." });
-    }
-
-    if (!parsedItems || parsedItems.length === 0) {
-        return res.status(400).json({ success: false, message: "Keranjang belanja kosong" });
-    }
-
-    if (!req.file) {
-        return res.status(400).json({ success: false, message: "Bukti pembayaran wajib diunggah." });
-    }
-
-    const connection = await pool.getConnection();
-
-    try {
-        const shopId = await getShopIdBySlug(connection, shop);
-        if (!shopId) {
-            return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
-        }
-
-        const fileExtension = req.file.originalname.split('.').pop();
-        const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
-
-        const uploadParams = {
-            Bucket: process.env.R2_BUCKET_NAME,
-            Key: uniqueFilename,
-            Body: req.file.buffer,
-            ContentType: req.file.mimetype,
-        };
-
-        await s3.send(new PutObjectCommand(uploadParams));
-        const urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
-
-        await connection.beginTransaction();
-
-        const orderQuery = `
-            INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, status, payment_proof_url)
-            VALUES (?, ?, ?, ?, ?, 'baru', ?)
-        `;
-        const [orderResult] = await connection.query(orderQuery, [
-            shopId, customer_name, customer_phone, table_or_address, total_price, urlBuktiBayar
-        ]);
-        
-        const newOrderId = orderResult.insertId; 
-
-        const itemQuery = `
-            INSERT INTO order_items (order_id, product_id, quantity, notes, subtotal)
-            VALUES (?, ?, ?, ?, ?)
-        `;
-
-        for (let item of parsedItems) {
-            const product_id = item.product_id || 1;
-            const subtotal = item.harga;
-            const notes = item.catatan || '';
-            
-            await connection.query(itemQuery, [newOrderId, product_id, 1, notes, subtotal]);
-        }
-
-        await connection.commit();
-
-        res.status(201).json({
-            success: true,
-            message: "Pesanan & bukti pembayaran berhasil dikirim!",
-            order_id: newOrderId,
-            payment_proof: urlBuktiBayar
-        });
-
-    } catch (error) {
-        await connection.rollback();
-        console.error("Error saat simpan pesanan + upload bukti:", error);
-        res.status(500).json({ success: false, message: "Gagal memproses pesanan di server: " + error.message });
-    } finally {
-        connection.release();
-    }
-});
 
 // ==========================================
 // ENDPOINT: PENJUAL MELIHAT ANTREAN (GET)
@@ -414,6 +281,292 @@ app.get('/api/orders/history', async (req, res) => {
 });
 
 // ==========================================
+// ENDPOINT: TAMBAH PRODUK BARU (POST) - UPDATE STOK
+// ==========================================
+app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
+    try {
+        const { nama_produk, harga, kategori, deskripsi, shop, stock } = req.body; 
+        
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: 'Warung tidak terdaftar atau parameter shop tidak valid.' });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'Foto produk wajib diunggah.' });
+        }
+
+        const fileExtension = req.file.originalname.split('.').pop();
+        const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+        const uploadParams = {
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: uniqueFilename,
+            Body: req.file.buffer, 
+            ContentType: req.file.mimetype,
+        };
+
+        await s3.send(new PutObjectCommand(uploadParams));
+
+        const urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+        const inputStock = stock !== undefined ? parseInt(stock) : 20;
+
+        const queryText = `
+            INSERT INTO products (shop_id, name, price, category, description, image_url, stock) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `;
+        
+        await pool.query(queryText, [shopId, nama_produk, harga, kategori, deskripsi || '', urlFoto, inputStock]);
+
+        res.status(201).json({
+            success: true,
+            message: 'Produk baru berhasil ditambahkan dan disimpan di Cloudflare R2!',
+            data: { shop_id: shopId, nama_produk, harga, kategori, deskripsi, foto: urlFoto, stock: inputStock }
+        });
+
+    } catch (error) {
+        console.error("Error saat menyimpan produk:", error);
+        res.status(500).json({ success: false, message: "Gagal menyimpan produk: " + error.message });
+    }
+});
+
+
+// ==========================================
+// ENDPOINT: UPDATE / EDIT PRODUK (POST/PUT) - UPDATE STOK
+// ==========================================
+app.post('/api/products/:id', upload.single('image'), async (req, res) => {
+    try {
+        const productId = req.params.id;
+        const name = req.body.name || req.body.nama_produk;
+        const price = req.body.price || req.body.harga;
+        const category = req.body.category || req.body.kategori;
+        const description = req.body.description || req.body.deskripsi || '';
+        const stock = req.body.stock;
+
+        if (!name || !price || !category) {
+            return res.status(400).json({ success: false, message: 'Nama, harga, dan kategori wajib diisi.' });
+        }
+
+        const [existingProduct] = await pool.query('SELECT image_url FROM products WHERE id = ?', [productId]);
+        if (existingProduct.length === 0) {
+            return res.status(404).json({ success: false, message: 'Produk tidak ditemukan.' });
+        }
+
+        let urlFoto = existingProduct[0].image_url;
+
+        if (req.file) {
+            const fileExtension = req.file.originalname.split('.').pop();
+            const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+            const uploadParams = {
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: uniqueFilename,
+                Body: req.file.buffer, 
+                ContentType: req.file.mimetype,
+            };
+
+            await s3.send(new PutObjectCommand(uploadParams));
+            urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+        }
+
+        const queryText = `
+            UPDATE products 
+            SET name = ?, price = ?, category = ?, description = ?, image_url = ?, stock = ?
+            WHERE id = ?
+        `;
+        
+        await pool.query(queryText, [name, price, category, description, urlFoto, stock !== undefined ? parseInt(stock) : 20, productId]);
+
+        res.json({
+            success: true,
+            message: 'Produk berhasil diperbarui!',
+            data: { id: productId, name, price, category, description, image_url: urlFoto, stock }
+        });
+
+    } catch (error) {
+        console.error("Error saat memperbarui produk:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui produk: " + error.message });
+    }
+});
+
+
+// ==========================================
+// ENDPOINT: PEMBELI MENGIRIM PESANAN + PENGURANGAN STOK
+// ==========================================
+app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
+    const { customer_name, customer_phone, table_or_address, total_price, items, shop } = req.body;
+
+    let parsedItems = [];
+    try {
+        parsedItems = typeof items === 'string' ? JSON.parse(items) : items;
+    } catch (e) {
+        return res.status(400).json({ success: false, message: "Format item pesanan tidak valid." });
+    }
+
+    if (!parsedItems || parsedItems.length === 0) {
+        return res.status(400).json({ success: false, message: "Keranjang belanja kosong" });
+    }
+
+    if (!req.file) {
+        return res.status(400).json({ success: false, message: "Bukti pembayaran wajib diunggah." });
+    }
+
+    const connection = await pool.getConnection();
+
+    try {
+        const shopId = await getShopIdBySlug(connection, shop);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
+        }
+
+        const fileExtension = req.file.originalname.split('.').pop();
+        const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+        const uploadParams = {
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: uniqueFilename,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+        };
+
+        await s3.send(new PutObjectCommand(uploadParams));
+        const urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+
+        // MULAI TRANSAKSI UNTUK MEMASTIKAN INTEGRITAS DATA STOK
+        await connection.beginTransaction();
+
+        // 1. VALIDASI STOK (Menggunakan SELECT FOR UPDATE untuk mencegah race condition)
+        for (let item of parsedItems) {
+            const product_id = item.product_id;
+            
+            const [prodRows] = await connection.query(
+                'SELECT name, stock, is_available FROM products WHERE id = ? FOR UPDATE',
+                [product_id]
+            );
+
+            if (prodRows.length === 0) {
+                throw new Error(`Produk dengan ID ${product_id} tidak ditemukan.`);
+            }
+
+            const product = prodRows[0];
+
+            if (product.stock < 1 || product.is_available === 0) {
+                throw new Error(`Maaf, stok untuk "${product.name}" sudah habis.`);
+            }
+        }
+
+        // 2. KURANGI STOK PRODUK
+        for (let item of parsedItems) {
+            const product_id = item.product_id;
+            await connection.query(
+                'UPDATE products SET stock = stock - 1 WHERE id = ?',
+                [product_id]
+            );
+        }
+
+        // 3. INSERT DATA ORDER
+        const orderQuery = `
+            INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, status, payment_proof_url)
+            VALUES (?, ?, ?, ?, ?, 'baru', ?)
+        `;
+        const [orderResult] = await connection.query(orderQuery, [
+            shopId, customer_name, customer_phone, table_or_address, total_price, urlBuktiBayar
+        ]);
+        
+        const newOrderId = orderResult.insertId; 
+
+        const itemQuery = `
+            INSERT INTO order_items (order_id, product_id, quantity, notes, subtotal)
+            VALUES (?, ?, ?, ?, ?)
+        `;
+
+        for (let item of parsedItems) {
+            const product_id = item.product_id;
+            const subtotal = item.harga;
+            const notes = item.catatan || '';
+            
+            await connection.query(itemQuery, [newOrderId, product_id, 1, notes, subtotal]);
+        }
+
+        await connection.commit();
+
+        res.status(201).json({
+            success: true,
+            message: "Pesanan & bukti pembayaran berhasil dikirim!",
+            order_id: newOrderId,
+            payment_proof: urlBuktiBayar
+        });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error saat simpan pesanan:", error);
+        res.status(500).json({ success: false, message: error.message });
+    } finally {
+        connection.release();
+    }
+});
+
+
+// =========================================================================
+// ENDPOINT: TOGGLE BUKA/TUTUP + RESET STOK KE 20 SAAT WARUNG BUKA
+// =========================================================================
+app.put('/api/shops/toggle-status', async (req, res) => {
+    try {
+        const { shop, is_open } = req.body; 
+
+        if (!shop) {
+            return res.status(400).json({ success: false, message: "Parameter shop wajib diisi." });
+        }
+
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        const statusBaru = Number(is_open) === 1 ? 1 : 0;
+
+        await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [statusBaru, shopId]);
+
+        // FITUR BARU: Reset otomatis semua stok produk warung ini menjadi 20 jika warung dibuka kembali
+        if (statusBaru === 1) {
+            await pool.query('UPDATE products SET stock = 20, is_available = 1 WHERE shop_id = ?', [shopId]);
+        }
+
+        res.json({
+            success: true,
+            message: `Status warung berhasil diubah menjadi ${statusBaru == 1 ? 'Buka (Stok menu direset ke 20)' : 'Tutup'}`,
+            is_open: statusBaru
+        });
+    } catch (error) {
+        console.error("Error update status warung:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui status warung" });
+    }
+});
+
+
+// ENDPOINT EDIT STOK SECARA LANGSUNG DARI HALAMAN ADMIN
+app.put('/api/products/:id/stock', async (req, res) => {
+    const productId = req.params.id;
+    const { stock } = req.body;
+
+    try {
+        const updateStock = parseInt(stock);
+        // Jika stok diset ke 0, otomatis ubah is_available menjadi 0 (Kosong)
+        const isAvailable = updateStock > 0 ? 1 : 0;
+
+        await pool.query(
+            'UPDATE products SET stock = ?, is_available = ? WHERE id = ?',
+            [updateStock, isAvailable, productId]
+        );
+
+        res.json({ success: true, message: "Stok berhasil diperbarui!" });
+    } catch (error) {
+        console.error("Error update stok produk:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui stok produk" });
+    }
+});
+
+// ==========================================
 // ENDPOINT: AMBIL SEMUA PRODUK UNTUK PEMBELI (GET)
 // ==========================================
 app.get('/api/products', async (req, res) => {
@@ -541,36 +694,6 @@ app.get('/api/shops/status', async (req, res) => {
     }
 });
 
-// 2. Endpoint untuk mengubah status warung secara dinamis (Toggle Buka/Tutup)
-app.put('/api/shops/toggle-status', async (req, res) => {
-    try {
-        const { shop, is_open } = req.body; // Dikirim melalui body request JSON
-
-        if (!shop) {
-            return res.status(400).json({ success: false, message: "Parameter shop wajib diisi." });
-        }
-
-        const shopId = await getShopIdBySlug(pool, shop);
-        if (!shopId) {
-            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
-        }
-
-        // Paksa convert input ke Number (0 atau 1)
-        const statusBaru = Number(is_open) === 1 ? 1 : 0;
-
-        // Jalankan query update status
-        await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [is_open, shopId]);
-
-        res.json({
-            success: true,
-            message: `Status warung berhasil diubah menjadi ${is_open == 1 ? 'Buka' : 'Tutup'}`,
-            is_open: statusBaru
-        });
-    } catch (error) {
-        console.error("Error update status warung:", error);
-        res.status(500).json({ success: false, message: "Gagal memperbarui status warung" });
-    }
-});
 
 // ==========================================
 // ENDPOINT: AMBIL DETAIL SATU PRODUK (GET)
@@ -594,67 +717,6 @@ app.get('/api/products/:id', async (req, res) => {
     }
 });
 
-// ==========================================
-// ENDPOINT: UPDATE / EDIT PRODUK (POST/PUT)
-// ==========================================
-app.post('/api/products/:id', upload.single('image'), async (req, res) => {
-    try {
-        const productId = req.params.id;
-        // Baca data input (mensupport key bahasa Inggris 'name' maupun Indonesia 'nama_produk')
-        const name = req.body.name || req.body.nama_produk;
-        const price = req.body.price || req.body.harga;
-        const category = req.body.category || req.body.kategori;
-        const description = req.body.description || req.body.deskripsi || '';
-        const shop = req.body.shop;
-
-        if (!name || !price || !category) {
-            return res.status(400).json({ success: false, message: 'Nama, harga, dan kategori wajib diisi.' });
-        }
-
-        // Pastikan produk ada di database
-        const [existingProduct] = await pool.query('SELECT image_url FROM products WHERE id = ?', [productId]);
-        if (existingProduct.length === 0) {
-            return res.status(404).json({ success: false, message: 'Produk tidak ditemukan.' });
-        }
-
-        let urlFoto = existingProduct[0].image_url; // Default gunakan foto lama
-
-        // Jika ada file foto baru yang diunggah, upload ke Cloudflare R2
-        if (req.file) {
-            const fileExtension = req.file.originalname.split('.').pop();
-            const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
-
-            const uploadParams = {
-                Bucket: process.env.R2_BUCKET_NAME,
-                Key: uniqueFilename,
-                Body: req.file.buffer, 
-                ContentType: req.file.mimetype,
-            };
-
-            await s3.send(new PutObjectCommand(uploadParams));
-            urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
-        }
-
-        // Lakukan query UPDATE ke database
-        const queryText = `
-            UPDATE products 
-            SET name = ?, price = ?, category = ?, description = ?, image_url = ?
-            WHERE id = ?
-        `;
-        
-        await pool.query(queryText, [name, price, category, description, urlFoto, productId]);
-
-        res.json({
-            success: true,
-            message: 'Produk berhasil diperbarui!',
-            data: { id: productId, name, price, category, description, image_url: urlFoto }
-        });
-
-    } catch (error) {
-        console.error("Error saat memperbarui produk:", error);
-        res.status(500).json({ success: false, message: "Gagal memperbarui produk: " + error.message });
-    }
-});
 
 // =========================================================================
 // ENDPOINT: UPDATE STATUS PESANAN DINAMIS (PATCH) - BARU, PROSES, REJECT, SELESAI
