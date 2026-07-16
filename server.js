@@ -160,10 +160,11 @@ app.get('/api/orders/active', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
+        // TAMBAHKAN o.payment_method DI QUERY DI BAWAH INI
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
-                o.total_price, o.status, o.created_at, o.payment_proof_url,
+                o.total_price, o.status, o.created_at, o.payment_proof_url, o.payment_method,
                 p.name AS nama_makanan, oi.quantity, oi.notes AS catatan_item
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
@@ -185,6 +186,7 @@ app.get('/api/orders/active', async (req, res) => {
                     status: row.status,
                     created_at: row.created_at,
                     payment_proof_url: row.payment_proof_url, 
+                    payment_method: row.payment_method, // DISISIPKAN DI SINI
                     items: []
                 };
             }
@@ -225,6 +227,9 @@ app.patch('/api/orders/:id/complete', async (req, res) => {
 // =========================================================================
 // ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET) - KHUSUS SELESAI/REJECT HARI INI (BERDASARKAN UPDATED_AT)
 // =========================================================================
+// =========================================================================
+// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET) - KHUSUS SELESAI/REJECT HARI INI
+// =========================================================================
 app.get('/api/orders/history', async (req, res) => {
     try {
         const shopSlug = req.query.shop;
@@ -233,12 +238,11 @@ app.get('/api/orders/history', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
-        // Sekarang kita menyaring berdasarkan 'updated_at' agar pesanan kemarin 
-        // yang baru diselesaikan/direject hari ini tetap muncul di riwayat hari ini.
+        // TAMBAHKAN o.payment_method DI QUERY DI BAWAH INI
         const queryText = `
             SELECT 
                 o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
-                o.total_price, o.status, o.created_at, o.updated_at, o.payment_proof_url,
+                o.total_price, o.status, o.created_at, o.updated_at, o.payment_proof_url, o.payment_method,
                 p.name AS nama_makanan, oi.quantity, oi.notes AS catatan_item
             FROM orders o
             JOIN order_items oi ON o.id = oi.order_id
@@ -261,8 +265,9 @@ app.get('/api/orders/history', async (req, res) => {
                     total_price: row.total_price,
                     status: row.status,
                     created_at: row.created_at,
-                    updated_at: row.updated_at, // Kita bawa juga data updated_at ke frontend
+                    updated_at: row.updated_at, 
                     payment_proof_url: row.payment_proof_url,
+                    payment_method: row.payment_method, // DISISIPKAN DI SINI
                     items: []
                 };
             }
