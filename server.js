@@ -394,7 +394,7 @@ app.post('/api/products/:id', upload.single('image'), async (req, res) => {
 // ENDPOINT: PEMBELI MENGIRIM PESANAN + PENGURANGAN STOK
 // ==========================================
 app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
-    const { customer_name, customer_phone, table_or_address, total_price, items, shop } = req.body;
+    const { customer_name, customer_phone, table_or_address, total_price, items, shop, payment_method } = req.body;
 
     let parsedItems = [];
     try {
@@ -407,8 +407,11 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
         return res.status(400).json({ success: false, message: "Keranjang belanja kosong" });
     }
 
-    if (!req.file) {
-        return res.status(400).json({ success: false, message: "Bukti pembayaran wajib diunggah." });
+    const metodePembayaran = payment_method || 'transfer';
+
+    // VALIDASI UPLOAD FILE: Hanya wajib jika metode pembayaran BUKAN cash
+    if (metodePembayaran === 'transfer' && !req.file) {
+        return res.status(400).json({ success: false, message: "Bukti pembayaran wajib diunggah untuk metode Transfer." });
     }
 
     const connection = await pool.getConnection();
@@ -419,58 +422,49 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
         }
 
-        const fileExtension = req.file.originalname.split('.').pop();
-        const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+        let urlBuktiBayar = null;
 
-        const uploadParams = {
-            Bucket: process.env.R2_BUCKET_NAME,
-            Key: uniqueFilename,
-            Body: req.file.buffer,
-            ContentType: req.file.mimetype,
-        };
+        // Proses upload file ke R2 hanya jika user mengirimkan berkas bukti bayar
+        if (req.file) {
+            const fileExtension = req.file.originalname.split('.').pop();
+            const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
 
-        await s3.send(new PutObjectCommand(uploadParams));
-        const urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+            const uploadParams = {
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: uniqueFilename,
+                Body: req.file.buffer,
+                ContentType: req.file.mimetype,
+            };
 
-        // MULAI TRANSAKSI UNTUK MEMASTIKAN INTEGRITAS DATA STOK
+            await s3.send(new PutObjectCommand(uploadParams));
+            urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+        }
+
         await connection.beginTransaction();
 
-        // 1. VALIDASI STOK (Menggunakan SELECT FOR UPDATE untuk mencegah race condition)
+        // 1. VALIDASI STOK
         for (let item of parsedItems) {
-            const product_id = item.product_id;
-            
             const [prodRows] = await connection.query(
                 'SELECT name, stock, is_available FROM products WHERE id = ? FOR UPDATE',
-                [product_id]
+                [item.product_id]
             );
-
-            if (prodRows.length === 0) {
-                throw new Error(`Produk dengan ID ${product_id} tidak ditemukan.`);
-            }
-
-            const product = prodRows[0];
-
-            if (product.stock < 1 || product.is_available === 0) {
-                throw new Error(`Maaf, stok untuk "${product.name}" sudah habis.`);
+            if (prodRows.length === 0 || prodRows[0].stock < 1 || prodRows[0].is_available === 0) {
+                throw new Error(`Maaf, stok untuk "${prodRows[0]?.name || 'Produk'}" sudah habis.`);
             }
         }
 
         // 2. KURANGI STOK PRODUK
         for (let item of parsedItems) {
-            const product_id = item.product_id;
-            await connection.query(
-                'UPDATE products SET stock = stock - 1 WHERE id = ?',
-                [product_id]
-            );
+            await connection.query('UPDATE products SET stock = stock - 1 WHERE id = ?', [item.product_id]);
         }
 
-        // 3. INSERT DATA ORDER
+        // 3. INSERT DATA ORDER (Menyertakan payment_method dan urlBuktiBayar yang bisa bernilai NULL)
         const orderQuery = `
-            INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, status, payment_proof_url)
-            VALUES (?, ?, ?, ?, ?, 'baru', ?)
+            INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, status, payment_proof_url, payment_method)
+            VALUES (?, ?, ?, ?, ?, 'baru', ?, ?)
         `;
         const [orderResult] = await connection.query(orderQuery, [
-            shopId, customer_name, customer_phone, table_or_address, total_price, urlBuktiBayar
+            shopId, customer_name, customer_phone, table_or_address, total_price, urlBuktiBayar, metodePembayaran
         ]);
         
         const newOrderId = orderResult.insertId; 
@@ -481,19 +475,16 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
         `;
 
         for (let item of parsedItems) {
-            const product_id = item.product_id;
-            const subtotal = item.harga;
-            const notes = item.catatan || '';
-            
-            await connection.query(itemQuery, [newOrderId, product_id, 1, notes, subtotal]);
+            await connection.query(itemQuery, [newOrderId, item.product_id, 1, item.catatan || '', item.harga]);
         }
 
         await connection.commit();
 
         res.status(201).json({
             success: true,
-            message: "Pesanan & bukti pembayaran berhasil dikirim!",
+            message: "Pesanan berhasil diproses!",
             order_id: newOrderId,
+            payment_method: metodePembayaran,
             payment_proof: urlBuktiBayar
         });
 
