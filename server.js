@@ -886,6 +886,41 @@ app.put('/api/shops/settings', upload.single('qris_image'), async (req, res) => 
         res.status(500).json({ success: false, message: "Gagal memperbarui pengaturan." });
     }
 });
+
+// Middleware Cek Akses Warung (Taruh di server.js)
+async function verifikasiAksesWarung(req, res, next) {
+    // Ambil parameter shop dari query string atau body
+    const shopSlug = req.query.shop || req.body.shop;
+    
+    // Ambil data pengenal dari header (dikirim oleh frontend nanti)
+    const clientShopId = req.headers['x-shop-id']; 
+
+    if (!shopSlug) {
+        return res.status(400).json({ success: false, message: "Akses ilegal: Parameter warung dibutuhkan." });
+    }
+
+    try {
+        const [rows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [shopSlug]);
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
+        }
+
+        // Jika Anda ingin proteksi API lebih ketat, pastikan x-shop-id dari frontend cocok dengan DB
+        if (clientShopId && Number(clientShopId) !== rows[0].id) {
+            return res.status(403).json({ success: false, message: "Akses terlarang: Token warung tidak cocok." });
+        }
+
+        next();
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Kesalahan validasi keamanan." });
+    }
+}
+
+// CONTOH PENERAPAN PADA ENDPOINT AKTIF
+// Tambahkan `verifikasiAksesWarung` di tengah-tengah route yang ingin dikunci:
+app.get('/api/orders/active', verifikasiAksesWarung, async (req, res) => {
+    // ... kode internal ambil data orders Anda tetap sama ...
+});
 // =========================================================================
 
 
