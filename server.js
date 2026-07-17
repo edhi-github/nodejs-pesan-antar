@@ -743,6 +743,73 @@ app.patch('/api/orders/:id/status', async (req, res) => {
         res.status(500).json({ success: false, message: "Gagal memperbarui status pesanan di database." });
     }
 });
+
+// =========================================================================
+// ENDPOINT: PEMBELI MENCARI PESANAN AKTIF BERDASARKAN NO. WHATSAPP (GET)
+// =========================================================================
+app.get('/api/orders/search', async (req, res) => {
+    try {
+        const { phone, shop } = req.query;
+
+        if (!phone || !shop) {
+            return res.status(400).json({ success: false, message: "Parameter nomor HP dan shop wajib diisi." });
+        }
+
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        // Cari pesanan milik shopId tersebut, nomor HP mirip, dan statusnya belum selesai ('baru' atau 'proses')
+        const queryText = `
+            SELECT 
+                o.id AS order_id, o.customer_name, o.customer_phone, o.table_or_address, 
+                o.total_price, o.status, o.created_at, o.payment_method,
+                p.name AS nama_makanan, oi.quantity, oi.notes AS catatan_item
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            JOIN products p ON oi.product_id = p.id
+            WHERE o.shop_id = ? 
+              AND (o.customer_phone = ? OR o.customer_phone LIKE ?)
+              AND o.status IN ('baru', 'proses')
+            ORDER BY o.created_at DESC
+        `;
+        
+        // Mendukung pencarian presisi atau parsial (misal input tanpa angka 0 di depan)
+        const searchLike = `%${phone}%`;
+        const [rows] = await pool.query(queryText, [shopId, phone, searchLike]);
+        
+        const ordersGrouped = {};
+        rows.forEach(row => {
+            if (!ordersGrouped[row.order_id]) {
+                ordersGrouped[row.order_id] = {
+                    id: row.order_id,
+                    customer_name: row.customer_name,
+                    customer_phone: row.customer_phone,
+                    table_or_address: row.table_or_address,
+                    total_price: row.total_price,
+                    status: row.status,
+                    created_at: row.created_at,
+                    payment_method: row.payment_method,
+                    items: []
+                };
+            }
+            ordersGrouped[row.order_id].items.push({
+                nama: row.nama_makanan,
+                kuantitas: row.quantity,
+                catatan: row.catatan_item
+            });
+        });
+
+        res.json({
+            success: true,
+            data: Object.values(ordersGrouped)
+        });
+    } catch (error) {
+        console.error("Error cari pesanan pembeli:", error);
+        res.status(500).json({ success: false, message: "Gagal melacak pesanan Anda." });
+    }
+});
 // =========================================================================
 
 
