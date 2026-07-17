@@ -523,9 +523,14 @@ app.put('/api/shops/toggle-status', async (req, res) => {
 
         await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [statusBaru, shopId]);
 
-        // FITUR BARU: Reset otomatis semua stok produk warung ini menjadi 20 jika warung dibuka kembali
+        // EDIT pada endpoint toggle-status bawaan: reset stok
         if (statusBaru === 1) {
-            await pool.query('UPDATE products SET stock = 20, is_available = 1 WHERE shop_id = ?', [shopId]);
+            // Ambil default_stock_qty milik toko tersebut
+            const [shopData] = await pool.query('SELECT default_stock_qty FROM shops WHERE id = ?', [shopId]);
+            const qtyBukaToko = shopData[0]?.default_stock_qty || 20;
+
+            // Gunakan nilai qtyBukaToko secara dinamis sebagai pengganti angka hardcode 20
+            await pool.query('UPDATE products SET stock = ?, is_available = 1 WHERE shop_id = ?', [qtyBukaToko, shopId]);
         }
 
         res.json({
@@ -808,6 +813,77 @@ app.get('/api/orders/search', async (req, res) => {
     } catch (error) {
         console.error("Error cari pesanan pembeli:", error);
         res.status(500).json({ success: false, message: "Gagal melacak pesanan Anda." });
+    }
+});
+
+// =========================================================================
+// FITUR BARU: MANAJEMEN SETTING WARUNG (GET & PUT)
+// =========================================================================
+
+// 1. Ambil Semua Konfigurasi / Setting Toko
+app.get('/api/shops/settings', async (req, res) => {
+    try {
+        const shopSlug = req.query.shop;
+        if (!shopSlug) return res.status(400).json({ success: false, message: "Parameter shop wajib diisi." });
+
+        const queryText = `
+            SELECT id, shop_name, slug, is_open, show_cash_payment, bank_rekening_info, qris_image_url, default_stock_qty 
+            FROM shops WHERE slug = ?
+        `;
+        const [rows] = await pool.query(queryText, [shopSlug]);
+        if (rows.length === 0) return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+
+        res.json({ success: true, data: rows[0] });
+    } catch (error) {
+        console.error("Error ambil setting toko:", error);
+        res.status(500).json({ success: false, message: "Gagal mengambil data setting toko." });
+    }
+});
+
+// 2. Simpan Perubahan Setting Toko (Termasuk Upload QRIS ke Cloudflare R2)
+app.put('/api/shops/settings', upload.single('qris_image'), async (req, res) => {
+    try {
+        const { shop, show_cash_payment, bank_rekening_info, default_stock_qty } = req.body;
+        
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+
+        const [existing] = await pool.query('SELECT qris_image_url FROM shops WHERE id = ?', [shopId]);
+        let urlQris = existing[0]?.qris_image_url || null;
+
+        // Jika ada upload gambar QRIS baru, kirim ke Cloudflare R2
+        if (req.file) {
+            const fileExtension = req.file.originalname.split('.').pop();
+            const uniqueFilename = `qris-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+            const uploadParams = {
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: uniqueFilename,
+                Body: req.file.buffer,
+                ContentType: req.file.mimetype,
+            };
+
+            await s3.send(new PutObjectCommand(uploadParams));
+            urlQris = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+        }
+
+        const queryUpdate = `
+            UPDATE shops 
+            SET show_cash_payment = ?, bank_rekening_info = ?, qris_image_url = ?, default_stock_qty = ?
+            WHERE id = ?
+        `;
+        await pool.query(queryUpdate, [
+            Number(show_cash_payment), 
+            bank_rekening_info || '', 
+            urlQris, 
+            parseInt(default_stock_qty) || 20, 
+            shopId
+        ]);
+
+        res.json({ success: true, message: "Pengaturan warung berhasil diperbarui!" });
+    } catch (error) {
+        console.error("Error update setting toko:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui pengaturan." });
     }
 });
 // =========================================================================
