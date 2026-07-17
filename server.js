@@ -907,6 +907,78 @@ app.get('/api/orders/active', verifikasiAksesWarung, async (req, res) => {
     // Diproses di atas
 });
 
+// =========================================================================
+// ENDPOINT BARU: GET DATA LAPORAN BERDASARKAN RENTANG TANGGAL (FOR EXCEL)
+// =========================================================================
+app.get('/api/orders/report', verifikasiAksesWarung, async (req, res) => {
+    try {
+        const shopSlug = req.query.shop;
+        const { startDate, endDate } = req.query;
+
+        if (!startDate || !endDate) {
+            return res.status(400).json({ success: false, message: "Parameter startDate dan endDate wajib diisi." });
+        }
+
+        const shopId = await getShopIdBySlug(pool, shopSlug);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        // Format filter tanggal agar mencakup waktu penuh dari mulai 00:00:00 s.d 23:59:59
+        const formattedStart = `${startDate} 00:00:00`;
+        const formattedEnd = `${endDate} 23:59:59`;
+
+        const queryText = `
+            SELECT 
+                o.id, o.customer_name, o.customer_phone, o.table_or_address, 
+                o.total_price, o.tax_amount, o.status, o.created_at, o.updated_at, o.payment_method,
+                p.name AS nama_makanan, oi.quantity, oi.notes AS catatan_item, oi.subtotal
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            JOIN products p ON oi.product_id = p.id
+            WHERE o.shop_id = ? 
+              AND o.status = 'selesai'
+              AND o.updated_at BETWEEN ? AND ?
+            ORDER BY o.updated_at DESC;
+        `;
+        
+        const [rows] = await pool.query(queryText, [shopId, formattedStart, formattedEnd]);
+        
+        const ordersGrouped = {};
+        rows.forEach(row => {
+            if (!ordersGrouped[row.id]) {
+                ordersGrouped[row.id] = {
+                    id: row.id,
+                    customer_name: row.customer_name,
+                    customer_phone: row.customer_phone,
+                    table_or_address: row.table_or_address,
+                    total_price: row.total_price,
+                    tax_amount: row.tax_amount,
+                    status: row.status,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at, 
+                    payment_method: row.payment_method,
+                    items: []
+                };
+            }
+            ordersGrouped[row.id].items.push({
+                nama: row.nama_makanan,
+                kuantitas: row.quantity,
+                subtotal: row.subtotal,
+                catatan: row.catatan_item
+            });
+        });
+
+        res.json({
+            success: true,
+            data: Object.values(ordersGrouped)
+        });
+    } catch (error) {
+        console.error("Error ambil laporan transaksi:", error);
+        res.status(500).json({ success: false, message: "Gagal memproses laporan dari database." });
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
