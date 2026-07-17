@@ -8,10 +8,11 @@ const crypto = require('crypto'); // Tambahan untuk penamaan file acak
 
 const app = express();
 
+// DENGAN KODE BARU INI:
 app.use(cors({
     origin: '*', 
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-shop-id'] // <-- Tambahkan 'x-shop-id' di sini
 }));
 
 app.use(express.json());
