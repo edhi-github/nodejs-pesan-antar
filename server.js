@@ -40,6 +40,17 @@ const s3 = new S3Client({
     },
 });
 
+// ==========================================
+// ENDPOINT: KONFIGURASI GLOBAL APLIKASI / BRANDING
+// ==========================================
+app.get('/api/app-config', (req, res) => {
+    res.json({
+        success: true,
+        app_name: process.env.APP_NAME || "BEDAorder",
+        logo_url: process.env.APP_LOGO_URL || "https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev/logo.png"
+    });
+});
+
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
@@ -98,7 +109,8 @@ app.post('/api/auth/login', async (req, res) => {
             message: 'Login berhasil!',
             shop_id: shop.id,
             shop_name: shop.shop_name,
-            slug: shop.slug
+            slug: shop.slug,
+            app_logo: process.env.APP_LOGO_URL || "https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev/logo.png" // <-- Tambahkan ini
         });
 
     } catch (error) {
