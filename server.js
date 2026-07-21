@@ -42,13 +42,7 @@ const s3 = new S3Client({
     },
 });
 
-document.addEventListener('DOMContentLoaded', () => {
-    const logoElement = document.getElementById('app-logo');
-    if (logoElement) {
-        // Menggabungkan API_URL dengan path /logo.png
-        logoElement.src = `${API_URL}/logo.png`;
-    }
-});
+
 
 const storage = multer.memoryStorage();
 
