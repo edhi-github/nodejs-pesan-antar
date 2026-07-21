@@ -8,6 +8,8 @@ const crypto = require('crypto'); // Tambahan untuk penamaan file acak
 
 const app = express();
 
+app.use(express.static('public'));
+
 // DENGAN KODE BARU INI:
 app.use(cors({
     origin: '*', 
