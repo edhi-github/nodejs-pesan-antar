@@ -21,11 +21,11 @@ app.use(express.json());
 
 // CONFIGURATION DATABASE MYSQL
 const dbConfig = {
-    host: process.env.MYSQLHOST || 'mysql.railway.internal',
-    user: process.env.MYSQLUSER || 'root',      
-    password: process.env.MYSQLPASSWORD || 'bQJkvxVCYjzQsTjSXySibRILeBXMQvko',      
-    database: process.env.MYSQL_DATABASE || 'beda', 
-    port: process.env.MYSQLPORT || 3306
+    host: process.env.MYSQLHOST,
+    user: process.env.MYSQLUSER,
+    password: process.env.MYSQLPASSWORD,
+    database: process.env.MYSQL_DATABASE,
+    port: process.env.MYSQLPORT ? parseInt(process.env.MYSQLPORT) : 3306
 };
 
 const pool = mysql.createPool(dbConfig);
@@ -41,7 +41,6 @@ const s3 = new S3Client({
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
     },
 });
-
 
 
 const storage = multer.memoryStorage();
