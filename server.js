@@ -42,15 +42,12 @@ const s3 = new S3Client({
     },
 });
 
-// ==========================================
-// ENDPOINT: KONFIGURASI GLOBAL APLIKASI / BRANDING
-// ==========================================
-app.get('/api/app-config', (req, res) => {
-    res.json({
-        success: true,
-        app_name: process.env.APP_NAME || "BEDAorder",
-        logo_url: process.env.APP_LOGO_URL || "https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev/logo.png"
-    });
+document.addEventListener('DOMContentLoaded', () => {
+    const logoElement = document.getElementById('app-logo');
+    if (logoElement) {
+        // Menggabungkan API_URL dengan path /logo.png
+        logoElement.src = `${API_URL}/logo.png`;
+    }
 });
 
 const storage = multer.memoryStorage();
