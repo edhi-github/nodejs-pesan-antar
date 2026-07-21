@@ -15,7 +15,7 @@ app.use(cors({
     origin: '*', 
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-shop-id'] // <-- Tambahkan 'x-shop-id' di sini
-}));
+})) ;
 
 app.use(express.json());
 
