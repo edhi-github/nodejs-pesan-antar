@@ -21,7 +21,7 @@ app.use(express.json());
 
 // CONFIGURATION DATABASE MYSQL
 const dbConfig = {
-    host: process.env.MYSQLHOST,
+    host: process.env.MYSQLHOST ||'mysql.railway.internal',
     user: process.env.MYSQLUSER,
     password: process.env.MYSQLPASSWORD,
     database: process.env.MYSQL_DATABASE,
