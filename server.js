@@ -115,15 +115,31 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT: PENDAFTARAN MITRA WARUNG BARU (TRIAL 14 HARI)
+// ENDPOINT: AMBIL DAFTAR PAKET LANGGANAN (GET)
+// ==========================================
+app.get('/api/packages', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT * FROM packages WHERE is_active = 1 ORDER BY price_monthly ASC');
+        res.json({
+            success: true,
+            data: rows
+        });
+    } catch (error) {
+        console.error("Error ambil daftar paket:", error);
+        res.status(500).json({ success: false, message: "Gagal mengambil daftar paket langganan." });
+    }
+});
+
+// ==========================================
+// ENDPOINT: PENDAFTARAN MITRA WARUNG BARU (TRIAL 14 HARI DENGAN PILIHAN PAKET)
 // ==========================================
 app.post('/api/register', async (req, res) => {
-    const { owner_name, shop_name, slug, username, password } = req.body;
+    const { owner_name, shop_name, slug, username, password, package_id } = req.body;
 
     if (!owner_name || !shop_name || !slug || !username || !password) {
         return res.status(400).json({ 
             success: false, 
-            message: "Semua field (Nama Pemilik, Nama Warung, Slug, Username, Password) wajib diisi." 
+            message: "Semua field wajib diisi." 
         });
     }
 
@@ -146,7 +162,12 @@ app.post('/api/register', async (req, res) => {
             });
         }
 
-        // 2. Hitung Tanggal Trial 14 Hari
+        // 2. Ambil Informasi Paket yang Dipilih (Fallback ke ID 1 / UMKM jika tidak diisi)
+        const selectedPackageId = package_id ? parseInt(package_id) : 1;
+        const [pkgRows] = await connection.query('SELECT name FROM packages WHERE id = ?', [selectedPackageId]);
+        const packageName = pkgRows.length > 0 ? pkgRows[0].name : 'UMKM';
+
+        // 3. Hitung Tanggal Trial 14 Hari
         const startDate = new Date();
         const endDate = new Date();
         endDate.setDate(startDate.getDate() + 14);
@@ -154,22 +175,22 @@ app.post('/api/register', async (req, res) => {
         const startDateStr = startDate.toISOString().split('T')[0];
         const endDateStr = endDate.toISOString().split('T')[0];
 
-        // 3. Insert Toko Baru ke Tabel `shops`
+        // 4. Insert Toko Baru ke Tabel `shops` (Termasuk package_id)
         const [shopResult] = await connection.query(
             `INSERT INTO shops 
-            (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until) 
-            VALUES (?, ?, ?, ?, ?, 1, 'trial', ?)`,
-            [shop_name, owner_name, slug, username, password, endDateStr]
+            (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until, package_id) 
+            VALUES (?, ?, ?, ?, ?, 1, 'trial', ?, ?)`,
+            [shop_name, owner_name, slug, username, password, endDateStr, selectedPackageId]
         );
 
         const newShopId = shopResult.insertId;
 
-        // 4. Insert Entry Trial ke Tabel `subscriptions`
+        // 5. Insert Entry Trial ke Tabel `subscriptions`
         await connection.query(
             `INSERT INTO subscriptions 
-            (shop_id, package_name, amount, start_date, end_date, status) 
-            VALUES (?, 'Trial 14 Hari', 0.00, ?, ?, 'active')`,
-            [newShopId, startDateStr, endDateStr]
+            (shop_id, package_id, package_name, amount, start_date, end_date, status) 
+            VALUES (?, ?, ?, 0.00, ?, ?, 'active')`,
+            [newShopId, selectedPackageId, `Trial 14 Hari (${packageName})`, startDateStr, endDateStr]
         );
 
         await connection.commit();
@@ -193,7 +214,6 @@ app.post('/api/register', async (req, res) => {
         connection.release();
     }
 });
-
 
 // ==========================================
 // ENDPOINT: PENDAFTARAN WARUNG DENGAN AUTH (POST)
