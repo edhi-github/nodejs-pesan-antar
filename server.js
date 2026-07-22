@@ -134,7 +134,7 @@ app.get('/api/packages', async (req, res) => {
 // ENDPOINT: PENDAFTARAN MITRA WARUNG BARU (TRIAL 14 HARI DENGAN PILIHAN PAKET)
 // ==========================================
 app.post('/api/register', async (req, res) => {
-    const { owner_name, shop_name, slug, username, password, package_id } = req.body;
+    const { owner_name, shop_name, slug, username, password, package_id, billing_cycle } = req.body;
 
     if (!owner_name || !shop_name || !slug || !username || !password) {
         return res.status(400).json({ 
@@ -148,7 +148,7 @@ app.post('/api/register', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Cek apakah Slug atau Username sudah terpakai
+        // 1. Cek ketersediaan slug/username
         const [existingShop] = await connection.query(
             "SELECT id FROM shops WHERE slug = ? OR username = ?", 
             [slug, username]
@@ -162,12 +162,15 @@ app.post('/api/register', async (req, res) => {
             });
         }
 
-        // 2. Ambil Informasi Paket yang Dipilih (Fallback ke ID 1 / UMKM jika tidak diisi)
+        // 2. Ambil informasi paket
         const selectedPackageId = package_id ? parseInt(package_id) : 1;
-        const [pkgRows] = await connection.query('SELECT name FROM packages WHERE id = ?', [selectedPackageId]);
+        const [pkgRows] = await connection.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [selectedPackageId]);
         const packageName = pkgRows.length > 0 ? pkgRows[0].name : 'UMKM';
 
-        // 3. Hitung Tanggal Trial 14 Hari
+        // Set Billing Cycle (Default ke 'monthly' jika kosong)
+        const cycle = (billing_cycle === 'yearly') ? 'yearly' : 'monthly';
+
+        // 3. Tentukan Tanggal Berakhir Trial 14 Hari
         const startDate = new Date();
         const endDate = new Date();
         endDate.setDate(startDate.getDate() + 14);
@@ -175,22 +178,22 @@ app.post('/api/register', async (req, res) => {
         const startDateStr = startDate.toISOString().split('T')[0];
         const endDateStr = endDate.toISOString().split('T')[0];
 
-        // 4. Insert Toko Baru ke Tabel `shops` (Termasuk package_id)
+        // 4. Simpan ke tabel shops
         const [shopResult] = await connection.query(
             `INSERT INTO shops 
-            (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until, package_id) 
-            VALUES (?, ?, ?, ?, ?, 1, 'trial', ?, ?)`,
-            [shop_name, owner_name, slug, username, password, endDateStr, selectedPackageId]
+            (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until, package_id, billing_cycle) 
+            VALUES (?, ?, ?, ?, ?, 1, 'trial', ?, ?, ?)`,
+            [shop_name, owner_name, slug, username, password, endDateStr, selectedPackageId, cycle]
         );
 
         const newShopId = shopResult.insertId;
 
-        // 5. Insert Entry Trial ke Tabel `subscriptions`
+        // 5. Simpan catatan transaksi trial ke subscriptions
         await connection.query(
             `INSERT INTO subscriptions 
-            (shop_id, package_id, package_name, amount, start_date, end_date, status) 
-            VALUES (?, ?, ?, 0.00, ?, ?, 'active')`,
-            [newShopId, selectedPackageId, `Trial 14 Hari (${packageName})`, startDateStr, endDateStr]
+            (shop_id, package_id, package_name, amount, start_date, end_date, status, billing_cycle) 
+            VALUES (?, ?, ?, 0.00, ?, ?, 'active', ?)`,
+            [newShopId, selectedPackageId, `Trial 14 Hari (${packageName} - ${cycle.toUpperCase()})`, startDateStr, endDateStr, cycle]
         );
 
         await connection.commit();
@@ -200,7 +203,8 @@ app.post('/api/register', async (req, res) => {
             message: "Registrasi mitra warung berhasil!",
             shop_id: newShopId,
             slug: slug,
-            subscription_until: endDateStr
+            subscription_until: endDateStr,
+            billing_cycle: cycle
         });
 
     } catch (error) {
