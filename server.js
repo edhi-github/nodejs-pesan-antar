@@ -21,7 +21,7 @@ app.use(express.json());
 
 // CONFIGURATION DATABASE MYSQL
 const dbConfig = {
-    host: process.env.MYSQLHOST ||'mysql.railway.internal',
+    host: process.env.MYSQLHOST,
     user: process.env.MYSQLUSER,
     password: process.env.MYSQLPASSWORD,
     database: process.env.MYSQL_DATABASE,
@@ -108,6 +108,86 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (error) {
         console.error("Error saat login:", error);
         res.status(500).json({ success: false, message: 'Terjadi kesalahan internal server: ' + error.message });
+    }
+});
+
+// ==========================================
+// ENDPOINT: PENDAFTARAN MITRA WARUNG BARU (TRIAL 14 HARI)
+// ==========================================
+app.post('/api/register', async (req, res) => {
+    const { owner_name, shop_name, slug, username, password } = req.body;
+
+    if (!owner_name || !shop_name || !slug || !username || !password) {
+        return res.status(400).json({ 
+            success: false, 
+            message: "Semua field (Nama Pemilik, Nama Warung, Slug, Username, Password) wajib diisi." 
+        });
+    }
+
+    const connection = await pool.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        // 1. Cek apakah Slug atau Username sudah terpakai
+        const [existingShop] = await connection.query(
+            "SELECT id FROM shops WHERE slug = ? OR username = ?", 
+            [slug, username]
+        );
+
+        if (existingShop.length > 0) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                success: false, 
+                message: "Nama warung / Slug atau Username sudah terpakai. Silakan gunakan yang lain." 
+            });
+        }
+
+        // 2. Hitung Tanggal Trial 14 Hari
+        const startDate = new Date();
+        const endDate = new Date();
+        endDate.setDate(startDate.getDate() + 14);
+
+        const startDateStr = startDate.toISOString().split('T')[0];
+        const endDateStr = endDate.toISOString().split('T')[0];
+
+        // 3. Insert Toko Baru ke Tabel `shops`
+        const [shopResult] = await connection.query(
+            `INSERT INTO shops 
+            (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until) 
+            VALUES (?, ?, ?, ?, ?, 1, 'trial', ?)`,
+            [shop_name, owner_name, slug, username, password, endDateStr]
+        );
+
+        const newShopId = shopResult.insertId;
+
+        // 4. Insert Entry Trial ke Tabel `subscriptions`
+        await connection.query(
+            `INSERT INTO subscriptions 
+            (shop_id, package_name, amount, start_date, end_date, status) 
+            VALUES (?, 'Trial 14 Hari', 0.00, ?, ?, 'active')`,
+            [newShopId, startDateStr, endDateStr]
+        );
+
+        await connection.commit();
+
+        return res.status(201).json({
+            success: true,
+            message: "Registrasi mitra warung berhasil!",
+            shop_id: newShopId,
+            slug: slug,
+            subscription_until: endDateStr
+        });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error pendaftaran warung:", error);
+        return res.status(500).json({ 
+            success: false, 
+            message: "Gagal memproses pendaftaran ke database: " + error.message 
+        });
+    } finally {
+        connection.release();
     }
 });
 
