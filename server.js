@@ -10,12 +10,15 @@ const app = express();
 
 app.use(express.static('public'));
 
-// DENGAN KODE BARU INI:
+// Konfigurasi CORS
 app.use(cors({
     origin: '*', 
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-shop-id'] // <-- Tambahkan 'x-shop-id' di sini
-})) ;
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-shop-id']
+}));
+
+// TAMBAHKAN BARIS INI: Tangani HTTP OPTIONS secara eksplisit untuk semua endpoint
+app.options('*', cors());
 
 app.use(express.json());
 
