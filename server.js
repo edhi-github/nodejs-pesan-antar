@@ -18,7 +18,7 @@ app.use(cors({
 }));
 
 // TAMBAHKAN BARIS INI: Tangani HTTP OPTIONS secara eksplisit untuk semua endpoint
-app.options('*', cors());
+app.options(/(.*)/, cors());
 
 app.use(express.json());
 
