@@ -78,12 +78,17 @@ async function getShopIdBySlug(connectionOrPool, slug) {
 // ==========================================
 
 // 1. Middleware Cek Akses Warung
+// 1. Middleware Cek Akses Warung (Diperbaiki)
 async function verifikasiAksesWarung(req, res, next) {
-    const shopSlug = req.query.shop || req.body.shop;
+    // Ambil shop dari Query, Body (jika ada), atau Header
+    const shopSlug = req.query.shop || (req.body && req.body.shop);
     const clientShopId = req.headers['x-shop-id']; 
 
     if (!shopSlug) {
-        return res.status(400).json({ success: false, message: "Akses ilegal: Parameter warung dibutuhkan." });
+        return res.status(400).json({ 
+            success: false, 
+            message: "Akses ilegal: Parameter warung (shop) dibutuhkan pada query string atau body." 
+        });
     }
 
     try {
@@ -102,7 +107,6 @@ async function verifikasiAksesWarung(req, res, next) {
     }
 }
 
-// 2. Middleware Cek Masa Aktif Sub + Toleransi 1 Hari
 // 2. Middleware Cek Masa Aktif Sub + Toleransi 1 Hari
 const cekMasaAktifSub = async (req, res, next) => {
     try {
@@ -462,7 +466,7 @@ app.get('/api/orders/history', verifikasiAksesWarung, async (req, res) => {
 // ==========================================
 // 1. KUNCI FITUR TAMBAH PRODUK BARU (POST)
 // ==========================================
-app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, upload.single('foto_produk'), async (req, res) => {
+app.post('/api/products',upload.single('foto_produk'), verifikasiAksesWarung, cekMasaAktifSub, async (req, res) => {
     try {
         // PERBAIKAN: Berikan fallback untuk nama field
         const nama_produk = req.body.nama_produk || req.body.name;
