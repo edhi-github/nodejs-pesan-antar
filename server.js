@@ -1132,31 +1132,83 @@ app.get('/api/orders/report', verifikasiAksesWarung, async (req, res) => {
 // ENDPOINT: CEK STATUS SUBSCRIPTION TOKO (GET) 
 // ==========================================
 // Controller/Route untuk get subscription info
+// ==========================================
+// ENDPOINT: CEK STATUS SUBSCRIPTION TOKO (GET) 
+// ==========================================
 app.get('/api/shops/subscription', async (req, res) => {
-    // ... ambil data shop ...
-    const sekarang = new Date();
-    const subUntil = new Date(shop.subscription_until);
-    
-    const batasToleransi = new Date(subUntil);
-    batasToleransi.setDate(batasToleransi.getDate() + 1);
-
-    // Hitung sisa hari murni (tanpa toleransi)
-    const diffTime = subUntil - sekarang;
-    const remainingDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    const isToleransi = sekarang > subUntil && sekarang <= batasToleransi;
-    const isExpiredTotal = sekarang > batasToleransi;
-
-    res.json({
-        success: true,
-        data: {
-            package_name: shop.package_name,
-            subscription_status: shop.subscription_status,
-            remaining_days: remainingDays,
-            is_toleransi: isToleransi,       // Pas lewat H sampai H+1
-            is_expired: isExpiredTotal       // Lewat dari H+1
+    try {
+        const shopSlug = req.query.shop;
+        
+        if (!shopSlug) {
+            return res.status(400).json({ 
+                success: false, 
+                message: "Parameter query warung (shop) wajib diisi." 
+            });
         }
-    });
+
+        // Query ke database untuk mengambil data toko dan paket langganan
+        const queryText = `
+            SELECT s.id, s.subscription_status, s.subscription_until, p.name AS package_name
+            FROM shops s
+            LEFT JOIN packages p ON s.package_id = p.id
+            WHERE s.slug = ?
+        `;
+        const [rows] = await pool.query(queryText, [shopSlug]);
+
+        if (rows.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                message: "Warung tidak ditemukan." 
+            });
+        }
+
+        const shop = rows[0];
+
+        // Jika subscription_until null (misal akun baru tanpa masa aktif)
+        if (!shop.subscription_until) {
+            return res.json({
+                success: true,
+                data: {
+                    package_name: shop.package_name || 'Tidak Ada Paket',
+                    subscription_status: shop.subscription_status || 'expired',
+                    remaining_days: 0,
+                    is_toleransi: false,
+                    is_expired: true
+                }
+            });
+        }
+
+        const sekarang = new Date();
+        const subUntil = new Date(shop.subscription_until);
+        
+        const batasToleransi = new Date(subUntil);
+        batasToleransi.setDate(batasToleransi.getDate() + 1);
+
+        // Hitung sisa hari murni (tanpa toleransi)
+        const diffTime = subUntil - sekarang;
+        const remainingDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        const isToleransi = sekarang > subUntil && sekarang <= batasToleransi;
+        const isExpiredTotal = sekarang > batasToleransi;
+
+        return res.json({
+            success: true,
+            data: {
+                package_name: shop.package_name || 'Trial/Basic',
+                subscription_status: shop.subscription_status,
+                remaining_days: remainingDays,
+                is_toleransi: isToleransi,       // Pas lewat H sampai H+1
+                is_expired: isExpiredTotal       // Lewat dari H+1
+            }
+        });
+
+    } catch (error) {
+        console.error("Error cek status langganan:", error);
+        return res.status(500).json({ 
+            success: false, 
+            message: "Terjadi kesalahan server: " + error.message 
+        });
+    }
 });
 
 // ==========================================
