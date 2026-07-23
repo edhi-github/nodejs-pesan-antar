@@ -106,12 +106,22 @@ async function verifikasiAksesWarung(req, res, next) {
 // 2. Middleware Cek Masa Aktif Sub + Toleransi 1 Hari
 const cekMasaAktifSub = async (req, res, next) => {
     try {
-        const shopId = req.headers['x-shop-id'] || req.query.shop_id;
-        if (!shopId) return res.status(400).json({ success: false, message: "Shop ID diperlukan" });
+        let shopId = req.headers['x-shop-id'] || req.query.shop_id;
+        const shopSlug = req.query.shop || req.body.shop;
 
-        // PERBAIKAN: Gunakan pool.query MySQL, bukan Shop.findById
+        // Fallback: Jika shopId dari header tidak valid/kosong, cari ID via slug warung
+        if ((!shopId || shopId === 'null' || shopId === 'undefined') && shopSlug) {
+            shopId = await getShopIdBySlug(pool, shopSlug);
+        }
+
+        if (!shopId) {
+            return res.status(400).json({ success: false, message: "Shop ID atau Parameter Shop tidak ditemukan/valid" });
+        }
+
         const [shops] = await pool.query('SELECT subscription_until FROM shops WHERE id = ?', [shopId]);
-        if (shops.length === 0) return res.status(404).json({ success: false, message: "Toko tidak ditemukan" });
+        if (shops.length === 0) {
+            return res.status(404).json({ success: false, message: "Toko tidak ditemukan" });
+        }
 
         const shop = shops[0];
         const sekarang = new Date();
