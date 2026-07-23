@@ -519,17 +519,24 @@ app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, upload.single(
 // ==========================================
 app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, upload.single('foto_produk'), async (req, res) => {
     try {
-        const productId = req.params.id;
-        const name = req.body.name || req.body.nama_produk;
-        const price = req.body.price || req.body.harga;
-        const category = req.body.category || req.body.kategori;
-        const description = req.body.description || req.body.deskripsi || '';
-        const stock = req.body.stock;
+        const productId = parseInt(req.params.id); // Convert ID ke Integer
+        
+        // Ambil data dengan fallback penamaan nama field
+        const name = req.body.nama_produk || req.body.name;
+        const price = req.body.harga || req.body.price;
+        const category = req.body.kategori || req.body.category;
+        const description = req.body.deskripsi || req.body.description || '';
+        
+        // Parsing Stok secara aman ke Integer
+        const parsedStock = req.body.stock !== undefined && req.body.stock !== null && req.body.stock !== '' 
+            ? parseInt(req.body.stock, 10) 
+            : 20;
 
         if (!name || !price || !category) {
             return res.status(400).json({ success: false, message: 'Nama, harga, dan kategori wajib diisi.' });
         }
 
+        // Cek keberadaan produk
         const [existingProduct] = await pool.query('SELECT image_url FROM products WHERE id = ?', [productId]);
         if (existingProduct.length === 0) {
             return res.status(404).json({ success: false, message: 'Produk tidak ditemukan.' });
@@ -537,6 +544,7 @@ app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, upload.sin
 
         let urlFoto = existingProduct[0].image_url;
 
+        // Jika user upload foto baru
         if (req.file) {
             const fileExtension = req.file.originalname.split('.').pop();
             const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
@@ -552,18 +560,27 @@ app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, upload.sin
             urlFoto = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
         }
 
+        // Query UPDATE dengan nilai yang ter-parse dengan aman
         const queryText = `
             UPDATE products 
             SET name = ?, price = ?, category = ?, description = ?, image_url = ?, stock = ?
             WHERE id = ?
         `;
         
-        await pool.query(queryText, [name, price, category, description, urlFoto, stock !== undefined ? parseInt(stock) : 20, productId]);
+        await pool.query(queryText, [
+            name, 
+            parseFloat(price), 
+            category, 
+            description, 
+            urlFoto, 
+            parsedStock, 
+            productId
+        ]);
 
         res.json({
             success: true,
             message: 'Produk berhasil diperbarui!',
-            data: { id: productId, name, price, category, description, image_url: urlFoto, stock }
+            data: { id: productId, name, price, category, description, image_url: urlFoto, stock: parsedStock }
         });
 
     } catch (error) {
