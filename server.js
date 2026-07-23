@@ -1090,7 +1090,7 @@ app.get('/api/orders/report', verifikasiAksesWarung, async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT: CEK STATUS SUBSCRIPTION TOKO (GET)
+// ENDPOINT: CEK STATUS SUBSCRIPTION TOKO (GET) 
 // ==========================================
 // Controller/Route untuk get subscription info
 app.get('/api/shops/subscription', async (req, res) => {
