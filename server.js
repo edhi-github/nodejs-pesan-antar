@@ -103,14 +103,17 @@ async function verifikasiAksesWarung(req, res, next) {
 }
 
 // 2. Middleware Cek Masa Aktif Sub + Toleransi 1 Hari
+// 2. Middleware Cek Masa Aktif Sub + Toleransi 1 Hari
 const cekMasaAktifSub = async (req, res, next) => {
     try {
         const shopId = req.headers['x-shop-id'] || req.query.shop_id;
         if (!shopId) return res.status(400).json({ success: false, message: "Shop ID diperlukan" });
 
-        const shop = await Shop.findById(shopId);
-        if (!shop) return res.status(404).json({ success: false, message: "Toko tidak ditemukan" });
+        // PERBAIKAN: Gunakan pool.query MySQL, bukan Shop.findById
+        const [shops] = await pool.query('SELECT subscription_until FROM shops WHERE id = ?', [shopId]);
+        if (shops.length === 0) return res.status(404).json({ success: false, message: "Toko tidak ditemukan" });
 
+        const shop = shops[0];
         const sekarang = new Date();
         const subUntil = new Date(shop.subscription_until);
 
@@ -127,11 +130,11 @@ const cekMasaAktifSub = async (req, res, next) => {
             });
         }
 
-        // Simpan data di req untuk digunakan route berikutnya jika diperlukan
         req.shop = shop;
         next();
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        console.error("Error pada cekMasaAktifSub:", error);
+        res.status(500).json({ success: false, message: "Error validasi langganan: " + error.message });
     }
 };
 
@@ -451,7 +454,12 @@ app.get('/api/orders/history', verifikasiAksesWarung, async (req, res) => {
 // ==========================================
 app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, upload.single('foto_produk'), async (req, res) => {
     try {
-        const { nama_produk, harga, kategori, deskripsi, shop, stock } = req.body; 
+        // PERBAIKAN: Berikan fallback untuk nama field
+        const nama_produk = req.body.nama_produk || req.body.name;
+        const harga = req.body.harga || req.body.price;
+        const kategori = req.body.kategori || req.body.category;
+        const deskripsi = req.body.deskripsi || req.body.description || '';
+        const { shop, stock } = req.body; 
         
         const shopId = await getShopIdBySlug(pool, shop);
         if (!shopId) {
@@ -482,7 +490,7 @@ app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, upload.single(
             VALUES (?, ?, ?, ?, ?, ?, ?)
         `;
         
-        await pool.query(queryText, [shopId, nama_produk, harga, kategori, deskripsi || '', urlFoto, inputStock]);
+        await pool.query(queryText, [shopId, nama_produk, harga, kategori, deskripsi, urlFoto, inputStock]);
 
         res.status(201).json({
             success: true,
