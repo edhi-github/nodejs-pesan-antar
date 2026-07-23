@@ -103,45 +103,37 @@ async function verifikasiAksesWarung(req, res, next) {
 }
 
 // 2. Middleware Cek Masa Aktif Sub + Toleransi 1 Hari
-async function cekMasaAktifSub(req, res, next) {
-    const shopSlug = req.query.shop || req.body.shop;
-
-    if (!shopSlug) {
-        return res.status(400).json({ success: false, message: "Parameter shop dibutuhkan." });
-    }
-
+const cekMasaAktifSub = async (req, res, next) => {
     try {
-        const [rows] = await pool.query(
-            'SELECT subscription_until FROM shops WHERE slug = ?', 
-            [shopSlug]
-        );
+        const shopId = req.headers['x-shop-id'] || req.query.shop_id;
+        if (!shopId) return res.status(400).json({ success: false, message: "Shop ID diperlukan" });
 
-        if (rows.length === 0) {
-            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
-        }
+        const shop = await Shop.findById(shopId);
+        if (!shop) return res.status(404).json({ success: false, message: "Toko tidak ditemukan" });
 
-        const subUntil = new Date(rows[0].subscription_until);
-        
-        // Buat batas toleransi: Tanggal Berakhir + 1 Hari (24 Jam)
+        const sekarang = new Date();
+        const subUntil = new Date(shop.subscription_until);
+
+        // Hitung batas toleransi: Tanggal Expired + 1 Hari
         const batasToleransi = new Date(subUntil);
         batasToleransi.setDate(batasToleransi.getDate() + 1);
 
-        const sekarang = new Date();
-
-        // Jika waktu sekarang sudah MELEWATI batas toleransi 1 hari
+        // Blokir HANYA JIKA sudah melewati batas toleransi (+1 hari)
         if (sekarang > batasToleransi) {
             return res.status(403).json({ 
                 success: false, 
-                message: "Masa langganan Anda telah habis (melewati batas toleransi 1 hari). Silakan lakukan perpanjangan paket!" 
+                is_expired: true,
+                message: "Masa aktif dan toleransi 1 hari Anda telah habis. Silakan lakukan perpanjangan paket!" 
             });
         }
 
-        next(); // Boleh diakses jika masih dalam masa aktif/toleransi
+        // Simpan data di req untuk digunakan route berikutnya jika diperlukan
+        req.shop = shop;
+        next();
     } catch (error) {
-        console.error("Error cek toleransi langganan:", error);
-        res.status(500).json({ success: false, message: "Gagal memvalidasi status langganan." });
+        res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
 // ==========================================
 // ENDPOINT: AUTENTIKASI LOGIN (POST)
@@ -1100,49 +1092,32 @@ app.get('/api/orders/report', verifikasiAksesWarung, async (req, res) => {
 // ==========================================
 // ENDPOINT: CEK STATUS SUBSCRIPTION TOKO (GET)
 // ==========================================
-app.get('/api/shops/subscription', verifikasiAksesWarung, async (req, res) => {
-    try {
-        const shopSlug = req.query.shop;
-        const [rows] = await pool.query(
-            `SELECT s.id, s.shop_name, s.subscription_status, s.subscription_until, s.package_id, s.billing_cycle, p.name as package_name, p.price_monthly, p.price_yearly
-             FROM shops s 
-             LEFT JOIN packages p ON s.package_id = p.id 
-             WHERE s.slug = ?`, 
-            [shopSlug]
-        );
+// Controller/Route untuk get subscription info
+app.get('/api/shops/subscription', async (req, res) => {
+    // ... ambil data shop ...
+    const sekarang = new Date();
+    const subUntil = new Date(shop.subscription_until);
+    
+    const batasToleransi = new Date(subUntil);
+    batasToleransi.setDate(batasToleransi.getDate() + 1);
 
-        if (rows.length === 0) {
-            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+    // Hitung sisa hari murni (tanpa toleransi)
+    const diffTime = subUntil - sekarang;
+    const remainingDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    const isToleransi = sekarang > subUntil && sekarang <= batasToleransi;
+    const isExpiredTotal = sekarang > batasToleransi;
+
+    res.json({
+        success: true,
+        data: {
+            package_name: shop.package_name,
+            subscription_status: shop.subscription_status,
+            remaining_days: remainingDays,
+            is_toleransi: isToleransi,       // Pas lewat H sampai H+1
+            is_expired: isExpiredTotal       // Lewat dari H+1
         }
-
-        const shop = rows[0];
-        const today = new Date();
-        const untilDate = new Date(shop.subscription_until);
-        
-        const diffTime = untilDate - today;
-        const remainingDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-        let isExpired = remainingDays <= 0;
-
-        res.json({
-            success: true,
-            data: {
-                shop_id: shop.id,
-                subscription_status: isExpired ? 'expired' : shop.subscription_status,
-                subscription_until: shop.subscription_until,
-                remaining_days: remainingDays > 0 ? remainingDays : 0,
-                is_expired: isExpired,
-                package_name: shop.package_name || 'UMKM',
-                package_id: shop.package_id,
-                billing_cycle: shop.billing_cycle || 'monthly',
-                price_monthly: shop.price_monthly,
-                price_yearly: shop.price_yearly
-            }
-        });
-    } catch (error) {
-        console.error("Error cek subscription:", error);
-        res.status(500).json({ success: false, message: "Gagal mengambil data langganan." });
-    }
+    });
 });
 
 // ==========================================
