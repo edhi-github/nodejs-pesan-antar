@@ -499,7 +499,7 @@ app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, upload.single(
 // ==========================================
 // 2. KUNCI FITUR UPDATE PRODUK / STOK (POST)
 // ==========================================
-app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, upload.single('image'), async (req, res) => {
+app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, upload.single('foto_produk'), async (req, res) => {
     try {
         const productId = req.params.id;
         const name = req.body.name || req.body.nama_produk;
