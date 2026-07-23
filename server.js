@@ -80,29 +80,39 @@ async function getShopIdBySlug(connectionOrPool, slug) {
 // 1. Middleware Cek Akses Warung
 // 1. Middleware Cek Akses Warung (Diperbaiki)
 async function verifikasiAksesWarung(req, res, next) {
-    // Ambil shop dari Query, Body (jika ada), atau Header
+    // Ambil shop dari Query, Body, atau Header x-shop-id
     const shopSlug = req.query.shop || (req.body && req.body.shop);
     const clientShopId = req.headers['x-shop-id']; 
 
-    if (!shopSlug) {
-        return res.status(400).json({ 
-            success: false, 
-            message: "Akses ilegal: Parameter warung (shop) dibutuhkan pada query string atau body." 
-        });
-    }
-
     try {
-        const [rows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [shopSlug]);
-        if (rows.length === 0) {
-            return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
+        let shopIdFound = null;
+
+        if (shopSlug) {
+            const [rows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [shopSlug]);
+            if (rows.length === 0) {
+                return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
+            }
+            shopIdFound = rows[0].id;
+        } else if (clientShopId && clientShopId !== 'null' && clientShopId !== 'undefined') {
+            const [rows] = await pool.query('SELECT id FROM shops WHERE id = ?', [clientShopId]);
+            if (rows.length === 0) {
+                return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
+            }
+            shopIdFound = rows[0].id;
+        } else {
+            return res.status(400).json({ 
+                success: false, 
+                message: "Akses ilegal: Parameter warung (shop) atau Header x-shop-id dibutuhkan." 
+            });
         }
 
-        if (clientShopId && Number(clientShopId) !== rows[0].id) {
+        if (clientShopId && shopIdFound && Number(clientShopId) !== shopIdFound) {
             return res.status(403).json({ success: false, message: "Akses terlarang: Token warung tidak cocok." });
         }
 
         next();
     } catch (error) {
+        console.error("Error verifikasiAksesWarung:", error);
         res.status(500).json({ success: false, message: "Kesalahan validasi keamanan." });
     }
 }
