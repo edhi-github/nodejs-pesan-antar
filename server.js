@@ -17,7 +17,7 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'x-shop-id']
 }));
 
-// TAMBAHKAN BARIS INI: Tangani HTTP OPTIONS secara eksplisit untuk semua endpoint
+// Tangani HTTP OPTIONS secara eksplisit untuk semua endpoint
 app.options(/(.*)/, cors());
 
 app.use(express.json());
@@ -45,7 +45,6 @@ const s3 = new S3Client({
     },
 });
 
-
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
@@ -57,7 +56,6 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({ storage: storage, fileFilter: fileFilter });
-
 
 // ==========================================
 // FUNGSIONALITAS HELPER MULTI-TENANT
@@ -75,6 +73,75 @@ async function getShopIdBySlug(connectionOrPool, slug) {
     return rows.length > 0 ? rows[0].id : null;
 }
 
+// ==========================================
+// MIDDLEWARE KEAMANAN & SUBSCRIPTION
+// ==========================================
+
+// 1. Middleware Cek Akses Warung
+async function verifikasiAksesWarung(req, res, next) {
+    const shopSlug = req.query.shop || req.body.shop;
+    const clientShopId = req.headers['x-shop-id']; 
+
+    if (!shopSlug) {
+        return res.status(400).json({ success: false, message: "Akses ilegal: Parameter warung dibutuhkan." });
+    }
+
+    try {
+        const [rows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [shopSlug]);
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
+        }
+
+        if (clientShopId && Number(clientShopId) !== rows[0].id) {
+            return res.status(403).json({ success: false, message: "Akses terlarang: Token warung tidak cocok." });
+        }
+
+        next();
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Kesalahan validasi keamanan." });
+    }
+}
+
+// 2. Middleware Cek Masa Aktif Sub + Toleransi 1 Hari
+async function cekMasaAktifSub(req, res, next) {
+    const shopSlug = req.query.shop || req.body.shop;
+
+    if (!shopSlug) {
+        return res.status(400).json({ success: false, message: "Parameter shop dibutuhkan." });
+    }
+
+    try {
+        const [rows] = await pool.query(
+            'SELECT subscription_until FROM shops WHERE slug = ?', 
+            [shopSlug]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        const subUntil = new Date(rows[0].subscription_until);
+        
+        // Buat batas toleransi: Tanggal Berakhir + 1 Hari (24 Jam)
+        const batasToleransi = new Date(subUntil);
+        batasToleransi.setDate(batasToleransi.getDate() + 1);
+
+        const sekarang = new Date();
+
+        // Jika waktu sekarang sudah MELEWATI batas toleransi 1 hari
+        if (sekarang > batasToleransi) {
+            return res.status(403).json({ 
+                success: false, 
+                message: "Masa langganan Anda telah habis (melewati batas toleransi 1 hari). Silakan lakukan perpanjangan paket!" 
+            });
+        }
+
+        next(); // Boleh diakses jika masih dalam masa aktif/toleransi
+    } catch (error) {
+        console.error("Error cek toleransi langganan:", error);
+        res.status(500).json({ success: false, message: "Gagal memvalidasi status langganan." });
+    }
+}
 
 // ==========================================
 // ENDPOINT: AUTENTIKASI LOGIN (POST)
@@ -105,7 +172,7 @@ app.post('/api/auth/login', async (req, res) => {
             shop_id: shop.id,
             shop_name: shop.shop_name,
             slug: shop.slug,
-            app_logo: process.env.APP_LOGO_URL || "https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev/logo.png" // <-- Tambahkan ini
+            app_logo: process.env.APP_LOGO_URL || "https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev/logo.png"
         });
 
     } catch (error) {
@@ -131,7 +198,7 @@ app.get('/api/packages', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT: PENDAFTARAN MITRA WARUNG BARU (TRIAL 14 HARI DENGAN PILIHAN PAKET)
+// ENDPOINT: PENDAFTARAN MITRA WARUNG BARU (TRIAL 14 HARI)
 // ==========================================
 app.post('/api/register', async (req, res) => {
     const { owner_name, shop_name, slug, username, password, package_id, billing_cycle } = req.body;
@@ -148,7 +215,6 @@ app.post('/api/register', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Cek ketersediaan slug/username
         const [existingShop] = await connection.query(
             "SELECT id FROM shops WHERE slug = ? OR username = ?", 
             [slug, username]
@@ -162,15 +228,12 @@ app.post('/api/register', async (req, res) => {
             });
         }
 
-        // 2. Ambil informasi paket
         const selectedPackageId = package_id ? parseInt(package_id) : 1;
         const [pkgRows] = await connection.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [selectedPackageId]);
         const packageName = pkgRows.length > 0 ? pkgRows[0].name : 'UMKM';
 
-        // Set Billing Cycle (Default ke 'monthly' jika kosong)
         const cycle = (billing_cycle === 'yearly') ? 'yearly' : 'monthly';
 
-        // 3. Tentukan Tanggal Berakhir Trial 14 Hari
         const startDate = new Date();
         const endDate = new Date();
         endDate.setDate(startDate.getDate() + 14);
@@ -178,7 +241,6 @@ app.post('/api/register', async (req, res) => {
         const startDateStr = startDate.toISOString().split('T')[0];
         const endDateStr = endDate.toISOString().split('T')[0];
 
-        // 4. Simpan ke tabel shops
         const [shopResult] = await connection.query(
             `INSERT INTO shops 
             (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until, package_id, billing_cycle) 
@@ -188,7 +250,6 @@ app.post('/api/register', async (req, res) => {
 
         const newShopId = shopResult.insertId;
 
-        // 5. Simpan catatan transaksi trial ke subscriptions
         await connection.query(
             `INSERT INTO subscriptions 
             (shop_id, package_id, package_name, amount, start_date, end_date, status, billing_cycle) 
@@ -258,13 +319,10 @@ app.post('/api/shops/register', async (req, res) => {
     }
 });
 
-
-
-
 // ==========================================
 // ENDPOINT: PENJUAL MELIHAT ANTREAN (GET)
 // ==========================================
-app.get('/api/orders/active', async (req, res) => {
+app.get('/api/orders/active', verifikasiAksesWarung, async (req, res) => {
     try {
         const shopSlug = req.query.shop;
         const shopId = await getShopIdBySlug(pool, shopSlug);
@@ -305,7 +363,7 @@ app.get('/api/orders/active', async (req, res) => {
             ordersGrouped[row.order_id].items.push({
                 nama: row.nama_makanan,
                 kuantitas: row.quantity,
-                harga: row.subtotal / row.quantity, // Mendapatkan harga satuan
+                harga: row.subtotal / row.quantity,
                 catatan: row.catatan_item
             });
         });
@@ -320,7 +378,7 @@ app.get('/api/orders/active', async (req, res) => {
 // ==========================================
 // ENDPOINT: PENJUAL KLIK SELESAI (PATCH)
 // ==========================================
-app.patch('/api/orders/:id/complete', async (req, res) => {
+app.patch('/api/orders/:id/complete', verifikasiAksesWarung, cekMasaAktifSub, async (req, res) => {
     const orderId = req.params.id;
     try {
         const queryText = `UPDATE orders SET status = 'selesai' WHERE id = ?`;
@@ -338,9 +396,9 @@ app.patch('/api/orders/:id/complete', async (req, res) => {
 });
 
 // =========================================================================
-// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET) - KHUSUS SELESAI/REJECT HARI INI
+// ENDPOINT: PENJUAL MELIHAT RIWAYAT (GET)
 // =========================================================================
-app.get('/api/orders/history', async (req, res) => {
+app.get('/api/orders/history', verifikasiAksesWarung, async (req, res) => {
     try {
         const shopSlug = req.query.shop;
         const shopId = await getShopIdBySlug(pool, shopSlug);
@@ -397,9 +455,9 @@ app.get('/api/orders/history', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINT: TAMBAH PRODUK BARU (POST) - UPDATE STOK
+// 1. KUNCI FITUR TAMBAH PRODUK BARU (POST)
 // ==========================================
-app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
+app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, upload.single('foto_produk'), async (req, res) => {
     try {
         const { nama_produk, harga, kategori, deskripsi, shop, stock } = req.body; 
         
@@ -446,11 +504,10 @@ app.post('/api/products', upload.single('foto_produk'), async (req, res) => {
     }
 });
 
-
 // ==========================================
-// ENDPOINT: UPDATE / EDIT PRODUK (POST/PUT) - UPDATE STOK
+// 2. KUNCI FITUR UPDATE PRODUK / STOK (POST)
 // ==========================================
-app.post('/api/products/:id', upload.single('image'), async (req, res) => {
+app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, upload.single('image'), async (req, res) => {
     try {
         const productId = req.params.id;
         const name = req.body.name || req.body.nama_produk;
@@ -505,9 +562,8 @@ app.post('/api/products/:id', upload.single('image'), async (req, res) => {
     }
 });
 
-
 // ==========================================
-// ENDPOINT: PEMBELI MENGIRIM PESANAN + PENGURANGAN STOK + PERHITUNGAN PAJAK
+// ENDPOINT: PEMBELI MENGIRIM PESANAN
 // ==========================================
 app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
     const { customer_name, customer_phone, table_or_address, total_price, items, shop, payment_method } = req.body;
@@ -537,7 +593,6 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
         }
 
-        // Ambil data pajak toko dari database
         const [shopRows] = await connection.query('SELECT has_tax, tax_percentage FROM shops WHERE id = ?', [shopId]);
         const hasTax = shopRows[0]?.has_tax === 1;
         const taxPercentage = parseFloat(shopRows[0]?.tax_percentage || 0);
@@ -561,7 +616,6 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
 
         await connection.beginTransaction();
 
-        // 1. VALIDASI STOK & RE-CALCULATE SUB-TOTAL
         let calculatedSubtotal = 0;
         for (let item of parsedItems) {
             const [prodRows] = await connection.query(
@@ -571,36 +625,29 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
             if (prodRows.length === 0 || prodRows[0].stock < 1 || prodRows[0].is_available === 0) {
                 throw new Error(`Maaf, stok untuk "${prodRows[0]?.name || 'Produk'}" sudah habis.`);
             }
-            // Gunakan harga asli dari database server demi keamanan perhitungan total
             calculatedSubtotal += parseFloat(prodRows[0].price);
         }
 
-        // 2. HITUNG PAJAK SECARA DINAMIS DI SERVER
         let taxAmount = 0;
         let finalTotalPrice = calculatedSubtotal;
 
         if (hasTax) {
             if (taxPercentage > 0) {
-                // Pajak tambahan (menambah total belanja)
                 taxAmount = (calculatedSubtotal * taxPercentage) / 100;
                 finalTotalPrice = calculatedSubtotal + taxAmount;
             } else {
-                // Pajak = 0, harga sudah termasuk pajak (taxAmount dicatat 0 di database)
                 taxAmount = 0;
                 finalTotalPrice = calculatedSubtotal;
             }
         } else {
-            // Tanpa pajak
             taxAmount = 0;
             finalTotalPrice = calculatedSubtotal;
         }
 
-        // 3. KURANGI STOK PRODUK
         for (let item of parsedItems) {
             await connection.query('UPDATE products SET stock = stock - 1 WHERE id = ?', [item.product_id]);
         }
 
-        // 4. INSERT DATA ORDER (Menyertakan tax_amount hasil hitungan server)
         const orderQuery = `
             INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, tax_amount, status, payment_proof_url, payment_method)
             VALUES (?, ?, ?, ?, ?, ?, 'baru', ?, ?)
@@ -639,11 +686,10 @@ app.post('/api/orders', upload.single('payment_proof'), async (req, res) => {
     }
 });
 
-
-// =========================================================================
-// ENDPOINT: TOGGLE BUKA/TUTUP + RESET STOK KE DEFAULT SAAT WARUNG BUKA
-// =========================================================================
-app.put('/api/shops/toggle-status', async (req, res) => {
+// ==========================================
+// 4. KUNCI FITUR TOGGLE BUKA/TUTUP WARUNG (PUT)
+// ==========================================
+app.put('/api/shops/toggle-status', verifikasiAksesWarung, cekMasaAktifSub, async (req, res) => {
     try {
         const { shop, is_open } = req.body; 
 
@@ -678,9 +724,8 @@ app.put('/api/shops/toggle-status', async (req, res) => {
     }
 });
 
-
 // ENDPOINT EDIT STOK SECARA LANGSUNG DARI HALAMAN ADMIN
-app.put('/api/products/:id/stock', async (req, res) => {
+app.put('/api/products/:id/stock', verifikasiAksesWarung, cekMasaAktifSub, async (req, res) => {
     const productId = req.params.id;
     const { stock } = req.body;
 
@@ -739,9 +784,8 @@ app.get('/api/products', async (req, res) => {
     }
 });
 
-
 // ENDPOINT UNTUK MENGUBAH STATUS KETERSEDIAAN PRODUK (ADMIN)
-app.put('/api/products/:id/toggle-available', async (req, res) => {
+app.put('/api/products/:id/toggle-available', verifikasiAksesWarung, cekMasaAktifSub, async (req, res) => {
     const productId = req.params.id;
     const { is_available } = req.body; 
 
@@ -765,12 +809,7 @@ app.put('/api/products/:id/toggle-available', async (req, res) => {
     }
 });
 
-
-// =========================================================================
-// TAMBAHAN BARU: ENDPOINT UNTUK MANAJEMEN STATUS WARUNG (is_open)
-// =========================================================================
-
-// 1. Endpoint untuk mendapatkan status warung saat ini (Buka/Tutup)
+// Endpoint untuk mendapatkan status warung saat ini (Buka/Tutup)
 app.get('/api/shops/status', async (req, res) => {
     try {
         const shopSlug = req.query.shop; 
@@ -796,7 +835,6 @@ app.get('/api/shops/status', async (req, res) => {
     }
 });
 
-
 // ==========================================
 // ENDPOINT: AMBIL DETAIL SATU PRODUK (GET)
 // ==========================================
@@ -819,11 +857,10 @@ app.get('/api/products/:id', async (req, res) => {
     }
 });
 
-
 // =========================================================================
-// ENDPOINT: UPDATE STATUS PESANAN DINAMIS (PATCH) - BARU, PROSES, REJECT, SELESAI
+// 3. KUNCI FITUR UBAH STATUS PESANAN (PATCH)
 // =========================================================================
-app.patch('/api/orders/:id/status', async (req, res) => {
+app.patch('/api/orders/:id/status', verifikasiAksesWarung, cekMasaAktifSub, async (req, res) => {
     const orderId = req.params.id;
     const { status } = req.body; 
 
@@ -918,11 +955,11 @@ app.get('/api/orders/search', async (req, res) => {
 });
 
 // =========================================================================
-// FITUR BARU: MANAJEMEN SETTING WARUNG (GET & PUT)
+// FITUR: MANAJEMEN SETTING WARUNG (GET & PUT)
 // =========================================================================
 
-// 1. Ambil Semua Konfigurasi / Setting Toko (Tambahkan field Pajak)
-app.get('/api/shops/settings', async (req, res) => {
+// 1. Ambil Semua Konfigurasi Toko
+app.get('/api/shops/settings', verifikasiAksesWarung, async (req, res) => {
     try {
         const shopSlug = req.query.shop;
         if (!shopSlug) return res.status(400).json({ success: false, message: "Parameter shop wajib diisi." });
@@ -941,8 +978,8 @@ app.get('/api/shops/settings', async (req, res) => {
     }
 });
 
-// 2. Simpan Perubahan Setting Toko (Pajak disimpan di sini)
-app.put('/api/shops/settings', upload.single('qris_image'), async (req, res) => {
+// 2. Simpan Perubahan Setting Toko
+app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, upload.single('qris_image'), async (req, res) => {
     try {
         const { shop, show_cash_payment, bank_rekening_info, default_stock_qty, has_tax, tax_percentage } = req.body;
         
@@ -989,37 +1026,8 @@ app.put('/api/shops/settings', upload.single('qris_image'), async (req, res) => 
     }
 });
 
-// Middleware Cek Akses Warung
-async function verifikasiAksesWarung(req, res, next) {
-    const shopSlug = req.query.shop || req.body.shop;
-    const clientShopId = req.headers['x-shop-id']; 
-
-    if (!shopSlug) {
-        return res.status(400).json({ success: false, message: "Akses ilegal: Parameter warung dibutuhkan." });
-    }
-
-    try {
-        const [rows] = await pool.query('SELECT id FROM shops WHERE slug = ?', [shopSlug]);
-        if (rows.length === 0) {
-            return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
-        }
-
-        if (clientShopId && Number(clientShopId) !== rows[0].id) {
-            return res.status(403).json({ success: false, message: "Akses terlarang: Token warung tidak cocok." });
-        }
-
-        next();
-    } catch (error) {
-        res.status(500).json({ success: false, message: "Kesalahan validasi keamanan." });
-    }
-}
-
-app.get('/api/orders/active', verifikasiAksesWarung, async (req, res) => {
-    // Diproses di atas
-});
-
 // =========================================================================
-// ENDPOINT BARU: GET DATA LAPORAN BERDASARKAN RENTANG TANGGAL (FOR EXCEL)
+// ENDPOINT: GET DATA LAPORAN BERDASARKAN RENTANG TANGGAL (FOR EXCEL)
 // =========================================================================
 app.get('/api/orders/report', verifikasiAksesWarung, async (req, res) => {
     try {
@@ -1035,7 +1043,6 @@ app.get('/api/orders/report', verifikasiAksesWarung, async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
-        // Format filter tanggal agar mencakup waktu penuh dari mulai 00:00:00 s.d 23:59:59
         const formattedStart = `${startDate} 00:00:00`;
         const formattedEnd = `${endDate} 23:59:59`;
 
@@ -1112,7 +1119,6 @@ app.get('/api/shops/subscription', verifikasiAksesWarung, async (req, res) => {
         const today = new Date();
         const untilDate = new Date(shop.subscription_until);
         
-        // Hitung selisih hari (Sisa Hari)
         const diffTime = untilDate - today;
         const remainingDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
@@ -1155,7 +1161,6 @@ app.post('/api/shops/subscribe', upload.single('payment_proof'), async (req, res
             return res.status(400).json({ success: false, message: "Bukti transfer pembayaran paket wajib diunggah." });
         }
 
-        // 1. Ambil info paket dari DB
         const [pkgRows] = await pool.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [package_id]);
         if (pkgRows.length === 0) {
             return res.status(400).json({ success: false, message: "Paket tidak valid." });
@@ -1165,7 +1170,6 @@ app.post('/api/shops/subscribe', upload.single('payment_proof'), async (req, res
         const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
         const amount = cycle === 'yearly' ? pkg.price_yearly : pkg.price_monthly;
 
-        // 2. Upload Bukti Bayar ke Cloudflare R2
         const fileExtension = req.file.originalname.split('.').pop();
         const uniqueFilename = `sub-proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
 
@@ -1179,7 +1183,6 @@ app.post('/api/shops/subscribe', upload.single('payment_proof'), async (req, res
         await s3.send(new PutObjectCommand(uploadParams));
         const urlBukti = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
 
-        // 3. Catat transaksi pembayaran paket ke tabel subscriptions dengan status 'pending' (menunggu verifikasi Admin)
         const startDateStr = new Date().toISOString().split('T')[0];
         await pool.query(
             `INSERT INTO subscriptions (shop_id, package_id, package_name, amount, start_date, status, billing_cycle, payment_proof_url)
