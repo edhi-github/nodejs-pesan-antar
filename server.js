@@ -1090,6 +1090,114 @@ app.get('/api/orders/report', verifikasiAksesWarung, async (req, res) => {
     }
 });
 
+// ==========================================
+// ENDPOINT: CEK STATUS SUBSCRIPTION TOKO (GET)
+// ==========================================
+app.get('/api/shops/subscription', verifikasiAksesWarung, async (req, res) => {
+    try {
+        const shopSlug = req.query.shop;
+        const [rows] = await pool.query(
+            `SELECT s.id, s.shop_name, s.subscription_status, s.subscription_until, s.package_id, s.billing_cycle, p.name as package_name, p.price_monthly, p.price_yearly
+             FROM shops s 
+             LEFT JOIN packages p ON s.package_id = p.id 
+             WHERE s.slug = ?`, 
+            [shopSlug]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        const shop = rows[0];
+        const today = new Date();
+        const untilDate = new Date(shop.subscription_until);
+        
+        // Hitung selisih hari (Sisa Hari)
+        const diffTime = untilDate - today;
+        const remainingDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        let isExpired = remainingDays <= 0;
+
+        res.json({
+            success: true,
+            data: {
+                shop_id: shop.id,
+                subscription_status: isExpired ? 'expired' : shop.subscription_status,
+                subscription_until: shop.subscription_until,
+                remaining_days: remainingDays > 0 ? remainingDays : 0,
+                is_expired: isExpired,
+                package_name: shop.package_name || 'UMKM',
+                package_id: shop.package_id,
+                billing_cycle: shop.billing_cycle || 'monthly',
+                price_monthly: shop.price_monthly,
+                price_yearly: shop.price_yearly
+            }
+        });
+    } catch (error) {
+        console.error("Error cek subscription:", error);
+        res.status(500).json({ success: false, message: "Gagal mengambil data langganan." });
+    }
+});
+
+// ==========================================
+// ENDPOINT: SUBMIT PEMBAYARAN PERPANJANGAN PAKET (POST)
+// ==========================================
+app.post('/api/shops/subscribe', upload.single('payment_proof'), async (req, res) => {
+    try {
+        const { shop, package_id, billing_cycle } = req.body;
+        const shopId = await getShopIdBySlug(pool, shop);
+
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: "Bukti transfer pembayaran paket wajib diunggah." });
+        }
+
+        // 1. Ambil info paket dari DB
+        const [pkgRows] = await pool.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [package_id]);
+        if (pkgRows.length === 0) {
+            return res.status(400).json({ success: false, message: "Paket tidak valid." });
+        }
+
+        const pkg = pkgRows[0];
+        const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
+        const amount = cycle === 'yearly' ? pkg.price_yearly : pkg.price_monthly;
+
+        // 2. Upload Bukti Bayar ke Cloudflare R2
+        const fileExtension = req.file.originalname.split('.').pop();
+        const uniqueFilename = `sub-proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+        const uploadParams = {
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: uniqueFilename,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+        };
+
+        await s3.send(new PutObjectCommand(uploadParams));
+        const urlBukti = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+
+        // 3. Catat transaksi pembayaran paket ke tabel subscriptions dengan status 'pending' (menunggu verifikasi Admin)
+        const startDateStr = new Date().toISOString().split('T')[0];
+        await pool.query(
+            `INSERT INTO subscriptions (shop_id, package_id, package_name, amount, start_date, status, billing_cycle, payment_proof_url)
+             VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+            [shopId, package_id, `Perpanjangan ${pkg.name} (${cycle.toUpperCase()})`, amount, startDateStr, cycle, urlBukti]
+        );
+
+        res.json({
+            success: true,
+            message: "Konfirmasi pembayaran paket berhasil dikirim! Menunggu verifikasi admin."
+        });
+
+    } catch (error) {
+        console.error("Error submit bayar paket:", error);
+        res.status(500).json({ success: false, message: "Gagal memproses konfirmasi pembayaran: " + error.message });
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
