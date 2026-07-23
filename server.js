@@ -789,6 +789,9 @@ app.put('/api/products/:id/stock', verifikasiAksesWarung, cekMasaAktifSub, async
 // ==========================================
 // ENDPOINT: AMBIL SEMUA PRODUK UNTUK PEMBELI (GET)
 // ==========================================
+// ==========================================
+// ENDPOINT: AMBIL SEMUA PRODUK UNTUK PEMBELI (GET)
+// ==========================================
 app.get('/api/products', async (req, res) => {
     try {
         const shopSlug = req.query.shop;
@@ -797,26 +800,41 @@ app.get('/api/products', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan.", data: [] });
         }
 
+        // 1. Cek dulu status langganan warung
+        const [shopRows] = await pool.query('SELECT is_open, subscription_until FROM shops WHERE id = ?', [shopId]);
+        if (shopRows.length === 0) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan.", data: [] });
+        }
+
+        const shopData = shopRows[0];
+        let isOpenStatus = Number(shopData.is_open);
+        let isExpired = false;
+
+        // Hitung apakah sudah kadaluarsa (termasuk toleransi 1 hari)
+        if (shopData.subscription_until) {
+            const sekarang = new Date();
+            const subUntil = new Date(shopData.subscription_until);
+            const batasToleransi = new Date(subUntil);
+            batasToleransi.setDate(batasToleransi.getDate() + 1);
+
+            if (sekarang > batasToleransi) {
+                isOpenStatus = 0; // Paksa status toko TUTUP jika expired
+                isExpired = true;
+            }
+        }
+
+        // 2. Ambil daftar produk
         const queryText = `
-            SELECT p.*, s.is_open AS shop_status 
-            FROM products p 
-            JOIN shops s ON p.shop_id = s.id 
-            WHERE p.shop_id = ? 
-            ORDER BY p.id DESC
+            SELECT * FROM products 
+            WHERE shop_id = ? 
+            ORDER BY id DESC
         `;
         const [rows] = await pool.query(queryText, [shopId]);
-        
-        let isOpenStatus = 1;
-        if (rows.length > 0) {
-            isOpenStatus = Number(rows[0].shop_status);
-        } else {
-            const [shopRows] = await pool.query('SELECT is_open FROM shops WHERE id = ?', [shopId]);
-            if (shopRows.length > 0) isOpenStatus = Number(shopRows[0].is_open);
-        }
 
         res.json({
             success: true,
             is_open: isOpenStatus,
+            is_expired: isExpired,
             data: rows
         });
     } catch (error) {
