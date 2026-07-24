@@ -336,6 +336,62 @@ app.patch('/api/orders/:id/complete', verifikasiAksesWarung, cekMasaAktifSub, as
     }
 });
 
+// ==========================================
+// ENDPOINT UPDATE STATUS PESANAN (PROSES / REJECT / SELESAI)
+// ==========================================
+app.patch('/api/orders/:id/status', verifikasiAksesWarung, cekMasaAktifSub, async (req, res) => {
+    const orderId = req.params.id;
+    const { status } = req.body;
+
+    if (!status || !['proses', 'reject', 'selesai'].includes(status)) {
+        return res.status(400).json({ success: false, message: "Status pesanan tidak valid." });
+    }
+
+    const connection = await pool.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        // 1. Jika di-reject, kembalikan stok produk yang pernah dipotong/direservasi
+        if (status === 'reject') {
+            const [currentOrder] = await connection.query('SELECT status FROM orders WHERE id = ? FOR UPDATE', [orderId]);
+            
+            // Mengembalikan stok hanya jika pesanan belum selesai/reject sebelumnya
+            if (currentOrder.length > 0 && currentOrder[0].status !== 'reject' && currentOrder[0].status !== 'selesai') {
+                const [items] = await connection.query(
+                    'SELECT product_id, quantity FROM order_items WHERE order_id = ?',
+                    [orderId]
+                );
+
+                for (let item of items) {
+                    await connection.query(
+                        'UPDATE products SET stock = stock + ? WHERE id = ?',
+                        [item.quantity, item.product_id]
+                    );
+                }
+            }
+        }
+
+        // 2. Update status order di database
+        const [result] = await connection.query('UPDATE orders SET status = ? WHERE id = ?', [status, orderId]);
+
+        if (result.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(404).json({ success: false, message: "ID Pesanan tidak ditemukan." });
+        }
+
+        await connection.commit();
+        res.json({ success: true, message: `Status pesanan #${orderId} berhasil diubah ke '${status}'` });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error update status order:", error);
+        res.status(500).json({ success: false, message: "Gagal memperbarui status pesanan: " + error.message });
+    } finally {
+        connection.release();
+    }
+});
+
 // RIWAYAT
 app.get('/api/orders/history', verifikasiAksesWarung, async (req, res) => {
     try {
