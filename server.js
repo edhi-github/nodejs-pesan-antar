@@ -216,8 +216,8 @@ app.post('/api/register', async (req, res) => {
         }
 
         const selectedPackageId = package_id ? parseInt(package_id) : 1;
-        const [pkgRows] = await connection.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [selectedPackageId]);
-        const packageName = pkgRows.length > 0 ? pkgRows[0].name : 'UMKM';
+        const [pkgRows] = await connection.query('SELECT name, price_monthly, price_yearly, max_transactions_monthly FROM packages WHERE id = ?', [selectedPackageId]);
+        const packageData = pkgRows.length > 0 ? pkgRows[0] : { name: 'UMKM', max_transactions_monthly: 0 };
 
         const cycle = (billing_cycle === 'yearly') ? 'yearly' : 'monthly';
 
@@ -228,20 +228,22 @@ app.post('/api/register', async (req, res) => {
         const startDateStr = startDate.toISOString().split('T')[0];
         const endDateStr = endDate.toISOString().split('T')[0];
 
+        // INSERT ke shops
         const [shopResult] = await connection.query(
             `INSERT INTO shops 
-            (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until, package_id, billing_cycle) 
-            VALUES (?, ?, ?, ?, ?, 1, 'trial', ?, ?, ?)`,
-            [shop_name, owner_name, slug, username, password, endDateStr, selectedPackageId, cycle]
+            (shop_name, owner_name, slug, username, password, is_open, subscription_status, subscription_until, package_id, billing_cycle, max_transactions_monthly) 
+            VALUES (?, ?, ?, ?, ?, 1, 'trial', ?, ?, ?, ?)`,
+            [shop_name, owner_name, slug, username, password, endDateStr, selectedPackageId, cycle, packageData.max_transactions_monthly || 0]
         );
 
         const newShopId = shopResult.insertId;
 
+        // INSERT ke subscriptions
         await connection.query(
             `INSERT INTO subscriptions 
-            (shop_id, package_id, package_name, amount, start_date, end_date, status, billing_cycle) 
-            VALUES (?, ?, ?, 0.00, ?, ?, 'active', ?)`,
-            [newShopId, selectedPackageId, `Trial 14 Hari (${packageName} - ${cycle.toUpperCase()})`, startDateStr, endDateStr, cycle]
+            (shop_id, package_id, package_name, amount, start_date, end_date, status, billing_cycle, max_transactions_monthly) 
+            VALUES (?, ?, ?, 0.00, ?, ?, 'active', ?, ?)`,
+            [newShopId, selectedPackageId, `Trial 14 Hari (${packageData.name} - ${cycle.toUpperCase()})`, startDateStr, endDateStr, cycle, packageData.max_transactions_monthly || 0]
         );
 
         await connection.commit();
@@ -627,7 +629,11 @@ app.get('/api/products', async (req, res) => {
         }
 
         const [shopRows] = await pool.query(
-            'SELECT is_open, subscription_status, subscription_until FROM shops WHERE id = ?', 
+            `SELECT s.is_open, s.subscription_status, s.subscription_until, s.max_transactions_monthly,
+                    p.slug AS package_slug, p.name AS package_name, p.max_transactions_monthly AS pkg_max_tx
+             FROM shops s
+             LEFT JOIN packages p ON s.package_id = p.id
+             WHERE s.id = ?`, 
             [shopId]
         );
         
@@ -638,7 +644,9 @@ app.get('/api/products', async (req, res) => {
         const shopData = shopRows[0];
         let isOpenStatus = Number(shopData.is_open);
         let isExpired = false;
+        let isLimitReached = false;
 
+        // Cek Expired
         if (shopData.subscription_status === 'expired') {
             isOpenStatus = 0;
             isExpired = true;
@@ -656,17 +664,34 @@ app.get('/api/products', async (req, res) => {
             }
         }
 
-        const queryText = `
-            SELECT * FROM products 
-            WHERE shop_id = ? 
-            ORDER BY id DESC
-        `;
+        // Cek Kuota Transaksi Bulanan
+        const isSultanPackage = (shopData.package_slug && shopData.package_slug.toLowerCase() === 'sultan') ||
+                                (shopData.package_name && shopData.package_name.toLowerCase().includes('sultan'));
+        const limitTransaksi = shopData.max_transactions_monthly || shopData.pkg_max_tx || 0;
+
+        if (!isSultanPackage && limitTransaksi > 0) {
+            const [txRows] = await pool.query(
+                `SELECT COUNT(*) AS total_tx 
+                 FROM orders 
+                 WHERE shop_id = ? 
+                   AND status != 'reject' 
+                   AND created_at >= DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00')`,
+                [shopId]
+            );
+            if ((txRows[0].total_tx || 0) >= limitTransaksi) {
+                isOpenStatus = 0;
+                isLimitReached = true;
+            }
+        }
+
+        const queryText = `SELECT * FROM products WHERE shop_id = ? ORDER BY id DESC`;
         const [rows] = await pool.query(queryText, [shopId]);
 
         res.json({
             success: true,
             is_open: isOpenStatus,
             is_expired: isExpired,
+            is_limit_reached: isLimitReached,
             data: rows
         });
     } catch (error) {
@@ -739,14 +764,54 @@ app.post('/api/orders/reserve', async (req, res) => {
     const connection = await pool.getConnection();
 
     try {
-        const shopId = await getShopIdBySlug(connection, shop);
-        if (!shopId) {
+        const [shopRows] = await connection.query(
+            `SELECT s.id, s.is_open, s.has_tax, s.tax_percentage, s.max_transactions_monthly, 
+                    p.slug AS package_slug, p.name AS package_name, p.max_transactions_monthly AS pkg_max_tx
+             FROM shops s 
+             LEFT JOIN packages p ON s.package_id = p.id 
+             WHERE s.slug = ?`, 
+            [shop]
+        );
+
+        if (shopRows.length === 0) {
             return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
         }
 
-        const [shopRows] = await connection.query('SELECT has_tax, tax_percentage FROM shops WHERE id = ?', [shopId]);
-        const hasTax = shopRows[0]?.has_tax === 1;
-        const taxPercentage = parseFloat(shopRows[0]?.tax_percentage || 0);
+        const shopData = shopRows[0];
+        const shopId = shopData.id;
+
+        // -------------------------------------------------------------
+        // CEK 5: VALIDASI BATAS MAKSIMAL TRANSAKSI BULANAN (SELAIN SULTAN)
+        // -------------------------------------------------------------
+        const isSultanPackage = (shopData.package_slug && shopData.package_slug.toLowerCase() === 'sultan') ||
+                                (shopData.package_name && shopData.package_name.toLowerCase().includes('sultan'));
+        
+        const limitTransaksi = shopData.max_transactions_monthly || shopData.pkg_max_tx || 0;
+
+        if (!isSultanPackage && limitTransaksi > 0) {
+            // Hitung total transaksi bulan berjalan (bulan ini) yang tidak di-reject
+            const [txRows] = await connection.query(
+                `SELECT COUNT(*) AS total_tx 
+                 FROM orders 
+                 WHERE shop_id = ? 
+                   AND status != 'reject' 
+                   AND created_at >= DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00')`,
+                [shopId]
+            );
+
+            const totalTxBulanIni = txRows[0].total_tx || 0;
+
+            if (totalTxBulanIni >= limitTransaksi) {
+                return res.status(400).json({ 
+                    success: false, 
+                    is_limit_reached: true,
+                    message: `Mohon maaf, warung ini telah mencapai batas maksimal ${limitTransaksi} transaksi untuk bulan ini. Silakan hubungi pemilik warung.` 
+                });
+            }
+        }
+
+        const hasTax = shopData.has_tax === 1;
+        const taxPercentage = parseFloat(shopData.tax_percentage || 0);
 
         await connection.beginTransaction();
 
@@ -809,7 +874,6 @@ app.post('/api/orders/reserve', async (req, res) => {
 
         await connection.commit();
 
-        // Berikan batas waktu reservasi 5 menit
         const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
         res.status(201).json({
@@ -1436,18 +1500,23 @@ app.patch('/api/admin/subscriptions/:id/approve', async (req, res) => {
         const startDateStr = hariIni.toISOString().split('T')[0];
         const newUntilStr = newUntilDate.toISOString().split('T')[0];
 
+        // Ambil detail paket termasuk max_transactions_monthly
+        const [pkgRows] = await connection.query('SELECT max_transactions_monthly FROM packages WHERE id = ?', [sub.package_id]);
+        const maxTxMonthly = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
+
         // Update Tabel SHOPS
         await connection.query(
             `UPDATE shops 
-             SET subscription_status = 'active', 
-                 subscription_until = ?, 
-                 expired_at = NULL,
-                 package_id = ?, 
-                 billing_cycle = ? 
-             WHERE id = ?`,
-            [newUntilStr, sub.package_id, sub.billing_cycle, sub.shop_id]
+            SET subscription_status = 'active', 
+                subscription_until = ?, 
+                expired_at = NULL,
+                package_id = ?, 
+                billing_cycle = ?,
+                max_transactions_monthly = ? 
+            WHERE id = ?`,
+            [newUntilStr, sub.package_id, sub.billing_cycle, maxTxMonthly, sub.shop_id]
         );
-
+        
         // Update Tabel SUBSCRIPTIONS
         await connection.query(
             `UPDATE subscriptions 
