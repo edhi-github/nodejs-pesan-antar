@@ -706,12 +706,16 @@ app.post('/api/orders/reserve', async (req, res) => {
         for (let productId in itemQuantities) {
             const qtyNeeded = itemQuantities[productId];
             const [prodRows] = await connection.query(
-                'SELECT name, price, stock, is_available FROM products WHERE id = ? FOR UPDATE',
+                'SELECT id, name, price, stock, is_available FROM products WHERE id = ? FOR UPDATE',
                 [productId]
             );
 
             if (prodRows.length === 0 || prodRows[0].is_available === 0 || prodRows[0].stock < qtyNeeded) {
-                throw new Error(`Maaf, stok "${prodRows[0]?.name || 'Produk'}" tidak mencukupi atau sudah habis.`);
+                const namaProduk = prodRows[0]?.name || 'Produk terpilih';
+                const err = new Error(`Maaf, "${namaProduk}" baru saja diambil pelanggan lain / kehabisan stok!`);
+                err.out_of_stock_id = productId;
+                err.product_name = namaProduk;
+                throw err;
             }
 
             calculatedSubtotal += parseFloat(prodRows[0].price) * qtyNeeded;
@@ -763,7 +767,12 @@ app.post('/api/orders/reserve', async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error("Error reservasi stok:", error);
-        res.status(400).json({ success: false, message: error.message });
+        res.status(400).json({ 
+            success: false, 
+            message: error.message,
+            out_of_stock_id: error.out_of_stock_id || null,
+            product_name: error.product_name || null
+        });
     } finally {
         connection.release();
     }
