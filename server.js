@@ -1255,28 +1255,25 @@ app.get('/api/shops/subscription', async (req, res) => {
     }
 });
 
-app.post('/api/shops/subscribe', upload.single('payment_proof'), async (req, res) => {
+// ==========================================
+// ENDPOINT: PERPANJANGAN / BAYAR PAKET SUBSCRIPTION
+// ==========================================
+app.post('/api/shops/subscribe', upload.single('payment_proof_url'), verifikasiAksesWarung, async (req, res) => {
     try {
         const { shop, package_id, billing_cycle } = req.body;
-        const shopId = await getShopIdBySlug(pool, shop);
+        const selectedPackageId = package_id ? parseInt(package_id) : 1;
+        const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
 
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: "File bukti pembayaran wajib diunggah." });
+        }
+
+        const shopId = await getShopIdBySlug(pool, shop);
         if (!shopId) {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
         }
 
-        if (!req.file) {
-            return res.status(400).json({ success: false, message: "Bukti transfer pembayaran paket wajib diunggah." });
-        }
-
-        const [pkgRows] = await pool.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [package_id]);
-        if (pkgRows.length === 0) {
-            return res.status(400).json({ success: false, message: "Paket tidak valid." });
-        }
-
-        const pkg = pkgRows[0];
-        const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
-        const amount = cycle === 'yearly' ? pkg.price_yearly : pkg.price_monthly;
-
+        // Upload bukti pembayaran perpanjangan paket ke Cloudflare R2 / S3
         const fileExtension = req.file.originalname.split('.').pop();
         const uniqueFilename = `sub-proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
 
@@ -1288,23 +1285,49 @@ app.post('/api/shops/subscribe', upload.single('payment_proof'), async (req, res
         };
 
         await s3.send(new PutObjectCommand(uploadParams));
-        const urlBukti = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+        const urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+
+        // Ambil info nama paket & harga
+        const [pkgRows] = await pool.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [selectedPackageId]);
+        const packageName = pkgRows.length > 0 ? pkgRows[0].name : 'Paket Warung';
+        const amount = pkgRows.length > 0 ? (cycle === 'yearly' ? pkgRows[0].price_yearly : pkgRows[0].price_monthly) : 0;
 
         const startDateStr = new Date().toISOString().split('T')[0];
+
+        // Tentukan batas waktu perpanjangan sementara/pending (misal dikonfirmasi admin atau otomatis bertambah 30/365 hari)
+        const durasiHari = cycle === 'yearly' ? 365 : 30;
+        const endDate = new Date();
+        endDate.setDate(endDate.getDate() + durasiHari);
+        const endDateStr = endDate.toISOString().split('T')[0];
+
+        // Catat riwayat perpanjangan paket
         await pool.query(
-            `INSERT INTO subscriptions (shop_id, package_id, package_name, amount, start_date, status, billing_cycle, payment_proof_url)
-             VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
-            [shopId, package_id, `Perpanjangan ${pkg.name} (${cycle.toUpperCase()})`, amount, startDateStr, cycle, urlBukti]
+            `INSERT INTO subscriptions 
+            (shop_id, package_id, package_name, amount, start_date, end_date, status, billing_cycle, payment_proof_url) 
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+            [shopId, selectedPackageId, `${packageName} (${cycle.toUpperCase()})`, amount, startDateStr, endDateStr, cycle, urlBuktiBayar]
+        );
+
+        // Update status di tabel shops agar masa aktif bertambah
+        await pool.query(
+            `UPDATE shops SET 
+                subscription_status = 'active', 
+                subscription_until = ?, 
+                package_id = ?, 
+                billing_cycle = ? 
+            WHERE id = ?`,
+            [endDateStr, selectedPackageId, cycle, shopId]
         );
 
         res.json({
             success: true,
-            message: "Konfirmasi pembayaran paket berhasil dikirim! Menunggu verifikasi admin."
+            message: "Bukti perpanjangan paket berhasil diunggah dan sedang diproses!",
+            payment_proof_url: urlBuktiBayar
         });
 
     } catch (error) {
-        console.error("Error submit bayar paket:", error);
-        res.status(500).json({ success: false, message: "Gagal memproses konfirmasi pembayaran: " + error.message });
+        console.error("Error perpanjangan paket:", error);
+        res.status(500).json({ success: false, message: "Gagal memproses bukti pembayaran paket: " + error.message });
     }
 });
 
