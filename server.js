@@ -975,6 +975,29 @@ app.get('/api/orders/search', async (req, res) => {
     }
 });
 
+// GET STATUS WARUNG (BUKA / TUTUP)
+app.get('/api/shops/status', verifikasiAksesWarung, async (req, res) => {
+    try {
+        const shopSlug = req.query.shop;
+        if (!shopSlug) {
+            return res.status(400).json({ success: false, message: "Parameter shop wajib diisi." });
+        }
+
+        const [rows] = await pool.query('SELECT is_open FROM shops WHERE slug = ?', [shopSlug]);
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Warung tidak ditemukan." });
+        }
+
+        res.json({
+            success: true,
+            is_open: rows[0].is_open
+        });
+    } catch (error) {
+        console.error("Error ambil status warung:", error);
+        res.status(500).json({ success: false, message: "Gagal mengambil status warung." });
+    }
+});
+
 // SETTINGS SHOP
 app.get('/api/shops/settings', verifikasiAksesWarung, async (req, res) => {
     try {
