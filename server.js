@@ -1310,12 +1310,12 @@ setInterval(async () => {
     try {
         await connection.beginTransaction();
 
-        // Cari pesanan transfer yang pending & sudah melewati 10 menit tanpa bukti bayar
+        // Cari pesanan transfer yang pending & sudah melewati 5 menit tanpa bukti bayar
         const [expiredOrders] = await connection.query(`
             SELECT id FROM orders 
             WHERE status = 'pending' 
               AND payment_method = 'transfer'
-              AND created_at < NOW() - INTERVAL 10 MINUTE
+              AND created_at < NOW() - INTERVAL 5 MINUTE
             FOR UPDATE
         `);
 
