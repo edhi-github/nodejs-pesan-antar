@@ -1364,6 +1364,116 @@ app.post('/api/shops/subscribe', verifikasiAksesWarung, upload.single('payment_p
     }
 });
 
+// 1. GET: Ambil semua transaksi langganan yang berstatus 'pending'
+app.get('/api/admin/subscriptions/pending', async (req, res) => {
+    try {
+        const [rows] = await pool.query(`
+            SELECT 
+                sub.id AS subscription_id,
+                sub.amount,
+                sub.package_name,
+                sub.billing_cycle,
+                sub.payment_proof_url,
+                sub.created_at,
+                s.id AS shop_id,
+                s.shop_name,
+                s.owner_name,
+                s.subscription_until AS current_until
+            FROM subscriptions sub
+            JOIN shops s ON sub.shop_id = s.id
+            WHERE sub.status = 'pending'
+            ORDER BY sub.created_at ASC
+        `);
+
+        res.json({ success: true, data: rows });
+    } catch (error) {
+        console.error("Error fetch pending subs:", error);
+        res.status(500).json({ success: false, message: "Gagal mengambil data transaksi." });
+    }
+});
+
+// 2. PATCH: Approve / Aktifkan status langganan
+app.patch('/api/admin/subscriptions/:id/approve', async (req, res) => {
+    const subscriptionId = req.params.id;
+    const connection = await pool.getConnection();
+
+    try {
+        await connection.beginTransaction();
+
+        // Ambil data transaksi pending
+        const [subRows] = await connection.query(
+            'SELECT shop_id, package_id, billing_cycle FROM subscriptions WHERE id = ? AND status = "pending" FOR UPDATE',
+            [subscriptionId]
+        );
+
+        if (subRows.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ success: false, message: "Transaksi pending tidak ditemukan." });
+        }
+
+        const sub = subRows[0];
+        const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
+
+        // Ambil data toko
+        const [shopRows] = await connection.query(
+            'SELECT subscription_until FROM shops WHERE id = ? FOR UPDATE',
+            [sub.shop_id]
+        );
+
+        const shop = shopRows[0];
+        const hariIni = new Date();
+        let baseDate = hariIni;
+
+        // Akumulasi: Jika toko masih aktif, perpanjang dari tanggal subscription_until sebelumnya
+        if (shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
+            baseDate = new Date(shop.subscription_until);
+        }
+
+        // Hitung tanggal berakhir baru
+        const newUntilDate = new Date(baseDate);
+        newUntilDate.setDate(newUntilDate.getDate() + daysToAdd);
+
+        const startDateStr = hariIni.toISOString().split('T')[0];
+        const newUntilStr = newUntilDate.toISOString().split('T')[0];
+
+        // Update Tabel SHOPS
+        await connection.query(
+            `UPDATE shops 
+             SET subscription_status = 'active', 
+                 subscription_until = ?, 
+                 expired_at = NULL,
+                 package_id = ?, 
+                 billing_cycle = ? 
+             WHERE id = ?`,
+            [newUntilStr, sub.package_id, sub.billing_cycle, sub.shop_id]
+        );
+
+        // Update Tabel SUBSCRIPTIONS
+        await connection.query(
+            `UPDATE subscriptions 
+             SET status = 'active', 
+                 start_date = ?, 
+                 end_date = ? 
+             WHERE id = ?`,
+            [startDateStr, newUntilStr, subscriptionId]
+        );
+
+        await connection.commit();
+
+        res.json({
+            success: true,
+            message: `Toko berhasil diaktifkan hingga ${newUntilStr}`
+        });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error approve subscription:", error);
+        res.status(500).json({ success: false, message: "Terjadi kesalahan server: " + error.message });
+    } finally {
+        connection.release();
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
