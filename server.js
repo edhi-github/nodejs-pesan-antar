@@ -789,9 +789,6 @@ app.put('/api/products/:id/stock', verifikasiAksesWarung, cekMasaAktifSub, async
 // ==========================================
 // ENDPOINT: AMBIL SEMUA PRODUK UNTUK PEMBELI (GET)
 // ==========================================
-// ==========================================
-// ENDPOINT: AMBIL SEMUA PRODUK UNTUK PEMBELI (GET)
-// ==========================================
 app.get('/api/products', async (req, res) => {
     try {
         const shopSlug = req.query.shop;
@@ -800,8 +797,12 @@ app.get('/api/products', async (req, res) => {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan.", data: [] });
         }
 
-        // 1. Cek dulu status langganan warung
-        const [shopRows] = await pool.query('SELECT is_open, subscription_until FROM shops WHERE id = ?', [shopId]);
+        // 1 & 2. Cek status warung dan status subscription dari tabel shops
+        const [shopRows] = await pool.query(
+            'SELECT is_open, subscription_status, subscription_until FROM shops WHERE id = ?', 
+            [shopId]
+        );
+        
         if (shopRows.length === 0) {
             return res.status(404).json({ success: false, message: "Warung tidak ditemukan.", data: [] });
         }
@@ -810,7 +811,13 @@ app.get('/api/products', async (req, res) => {
         let isOpenStatus = Number(shopData.is_open);
         let isExpired = false;
 
-        // Hitung apakah sudah kadaluarsa (termasuk toleransi 1 hari)
+        // Cek jika field subscription_status eksplisit 'expired'
+        if (shopData.subscription_status === 'expired') {
+            isOpenStatus = 0;
+            isExpired = true;
+        }
+
+        // Cek berdasarkan tanggal subscription_until (toleransi +1 hari)
         if (shopData.subscription_until) {
             const sekarang = new Date();
             const subUntil = new Date(shopData.subscription_until);
@@ -823,7 +830,7 @@ app.get('/api/products', async (req, res) => {
             }
         }
 
-        // 2. Ambil daftar produk
+        // Ambil daftar produk
         const queryText = `
             SELECT * FROM products 
             WHERE shop_id = ? 
