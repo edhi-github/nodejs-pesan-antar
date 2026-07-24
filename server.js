@@ -1302,6 +1302,217 @@ app.post('/api/shops/subscribe', upload.single('payment_proof'), async (req, res
     }
 });
 
+// ==========================================
+// AUTO-REVERT STOK KADALUARSA (RUN EVERY 1 MINUTE)
+// ==========================================
+setInterval(async () => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // Cari pesanan transfer yang pending & sudah melewati 10 menit tanpa bukti bayar
+        const [expiredOrders] = await connection.query(`
+            SELECT id FROM orders 
+            WHERE status = 'pending' 
+              AND payment_method = 'transfer'
+              AND created_at < NOW() - INTERVAL 10 MINUTE
+            FOR UPDATE
+        `);
+
+        for (let order of expiredOrders) {
+            // Ambil item pesanan untuk dikembalikan stoknya
+            const [items] = await connection.query(
+                'SELECT product_id, quantity FROM order_items WHERE order_id = ?',
+                [order.id]
+            );
+
+            for (let item of items) {
+                await connection.query(
+                    'UPDATE products SET stock = stock + ? WHERE id = ?',
+                    [item.quantity, item.product_id]
+                );
+            }
+
+            // Ubah status pesanan menjadi reject/expired
+            await connection.query(
+                "UPDATE orders SET status = 'reject' WHERE id = ?",
+                [order.id]
+            );
+        }
+
+        await connection.commit();
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error auto-revert expired reservations:", error);
+    } finally {
+        connection.release();
+    }
+}, 60000); // Jalan setiap 60 detik
+
+
+// ==========================================
+// ENDPOINT 1: PEMBELI MEMBUAT RESERVASI (POST)
+// ==========================================
+app.post('/api/orders/reserve', async (req, res) => {
+    const { customer_name, customer_phone, table_or_address, items, shop, payment_method } = req.body;
+
+    let parsedItems = [];
+    try {
+        parsedItems = typeof items === 'string' ? JSON.parse(items) : items;
+    } catch (e) {
+        return res.status(400).json({ success: false, message: "Format item pesanan tidak valid." });
+    }
+
+    if (!parsedItems || parsedItems.length === 0) {
+        return res.status(400).json({ success: false, message: "Keranjang belanja kosong" });
+    }
+
+    const metodePembayaran = payment_method || 'transfer';
+    const connection = await pool.getConnection();
+
+    try {
+        const shopId = await getShopIdBySlug(connection, shop);
+        if (!shopId) {
+            return res.status(404).json({ success: false, message: "Warung tidak terdaftar." });
+        }
+
+        const [shopRows] = await connection.query('SELECT has_tax, tax_percentage FROM shops WHERE id = ?', [shopId]);
+        const hasTax = shopRows[0]?.has_tax === 1;
+        const taxPercentage = parseFloat(shopRows[0]?.tax_percentage || 0);
+
+        await connection.beginTransaction();
+
+        // Grouping quantity per item
+        const itemQuantities = {};
+        for (let item of parsedItems) {
+            itemQuantities[item.product_id] = (itemQuantities[item.product_id] || 0) + 1;
+        }
+
+        let calculatedSubtotal = 0;
+
+        // Validasi stok & kunci baris (FOR UPDATE)
+        for (let productId in itemQuantities) {
+            const qtyNeeded = itemQuantities[productId];
+            const [prodRows] = await connection.query(
+                'SELECT name, price, stock, is_available FROM products WHERE id = ? FOR UPDATE',
+                [productId]
+            );
+
+            if (prodRows.length === 0 || prodRows[0].is_available === 0 || prodRows[0].stock < qtyNeeded) {
+                throw new Error(`Maaf, stok untuk "${prodRows[0]?.name || 'Produk'}" tidak mencukupi.`);
+            }
+
+            calculatedSubtotal += parseFloat(prodRows[0].price) * qtyNeeded;
+        }
+
+        // Kalkulasi Pajak
+        let taxAmount = 0;
+        let finalTotalPrice = calculatedSubtotal;
+        if (hasTax && taxPercentage > 0) {
+            taxAmount = (calculatedSubtotal * taxPercentage) / 100;
+            finalTotalPrice = calculatedSubtotal + taxAmount;
+        }
+
+        // Potong stok langsung saat reservasi
+        for (let productId in itemQuantities) {
+            const qtyNeeded = itemQuantities[productId];
+            await connection.query('UPDATE products SET stock = stock - ? WHERE id = ?', [qtyNeeded, productId]);
+        }
+
+        // Status awal: 'pending' jika transfer, 'baru' jika cash
+        const initialStatus = metodePembayaran === 'cash' ? 'baru' : 'pending';
+
+        const orderQuery = `
+            INSERT INTO orders (shop_id, customer_name, customer_phone, table_or_address, total_price, tax_amount, status, payment_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        const [orderResult] = await connection.query(orderQuery, [
+            shopId, customer_name, customer_phone, table_or_address, finalTotalPrice, taxAmount, initialStatus, metodePembayaran
+        ]);
+        
+        const newOrderId = orderResult.insertId; 
+
+        const itemQuery = `
+            INSERT INTO order_items (order_id, product_id, quantity, notes, subtotal)
+            VALUES (?, ?, ?, ?, ?)
+        `;
+
+        for (let item of parsedItems) {
+            await connection.query(itemQuery, [newOrderId, item.product_id, 1, item.catatan || '', item.harga]);
+        }
+
+        await connection.commit();
+
+        res.status(201).json({
+            success: true,
+            message: "Reservasi berhasil!",
+            order_id: newOrderId,
+            payment_method: metodePembayaran,
+            total_price: finalTotalPrice
+        });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Error saat reservasi pesanan:", error);
+        res.status(500).json({ success: false, message: error.message });
+    } finally {
+        connection.release();
+    }
+});
+
+
+// ==========================================
+// ENDPOINT 2: UPLOAD BUKTI BAYAR UNTUK RESERVASI (POST)
+// ==========================================
+app.post('/api/orders/:id/upload-proof', upload.single('payment_proof'), async (req, res) => {
+    const orderId = req.params.id;
+
+    if (!req.file) {
+        return res.status(400).json({ success: false, message: "Bukti pembayaran wajib diunggah." });
+    }
+
+    try {
+        const [rows] = await pool.query('SELECT status FROM orders WHERE id = ?', [orderId]);
+        if (rows.length === 0) {
+            return res.status(404).json({ success: false, message: "Pesanan tidak ditemukan." });
+        }
+
+        if (rows[0].status === 'reject') {
+            return res.status(400).json({ success: false, message: "Waktu reservasi Anda telah habis/dibatalkan." });
+        }
+
+        // Upload ke Cloudflare R2
+        const fileExtension = req.file.originalname.split('.').pop();
+        const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
+
+        const uploadParams = {
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: uniqueFilename,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+        };
+
+        await s3.send(new PutObjectCommand(uploadParams));
+        const urlBuktiBayar = `${process.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+
+        // Ubah status dari 'pending' ke 'baru' agar masuk ke antrean dapur penjual
+        await pool.query(
+            "UPDATE orders SET payment_proof_url = ?, status = 'baru' WHERE id = ?",
+            [urlBuktiBayar, orderId]
+        );
+
+        res.json({
+            success: true,
+            message: "Bukti pembayaran berhasil diunggah!",
+            payment_proof_url: urlBuktiBayar
+        });
+
+    } catch (error) {
+        console.error("Error upload bukti bayar:", error);
+        res.status(500).json({ success: false, message: "Gagal mengunggah bukti bayar: " + error.message });
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
