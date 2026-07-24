@@ -990,7 +990,7 @@ app.get('/api/orders/search', async (req, res) => {
             JOIN products p ON oi.product_id = p.id
             WHERE o.shop_id = ? 
               AND (o.customer_phone = ? OR o.customer_phone LIKE ?)
-              AND o.status IN ('baru', 'proses')
+              AND (o.status IN ('baru', 'proses') OR (o.status='selesai' AND date(o.updated_at)=DATE(SYSDATE())))
             ORDER BY o.created_at DESC
         `;
         
